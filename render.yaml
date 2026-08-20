@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: lightt-observation-planner
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+    startCommand: python -m uvicorn app:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: LIGHTT_HOSTED
+        value: "1"
+      - key: LIGHTT_PROFILE_STORAGE
+        value: browser
+      - key: LIGHTT_DATA_ROOT
+        value: /tmp/lightt
+      - key: LIGHTT_ANALYSIS_CONCURRENCY
+        value: "1"
+      - key: LIGHTT_MAX_UPLOAD_BYTES
+        value: "188743680"
+      - key: LIGHTT_MAX_REQUEST_BYTES
+        value: "272629760"
+      - key: LIGHTT_MAX_IMAGE_PIXELS
+        value: "45000000"
+      - key: MPLCONFIGDIR
+        value: /tmp/matplotlib
+      - key: PYTHONUNBUFFERED
+        value: "1"

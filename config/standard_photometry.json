@@ -1,0 +1,16 @@
+{
+  "enabled": false,
+  "apply_background_scenario": false,
+  "allsky_zero_point": null,
+  "allsky_extinction_k": null,
+  "allsky_color_term": 0.0,
+  "allsky_fit_star_count": 0,
+  "allsky_fit_rms_mag": null,
+  "allsky_fit_data_hash": null,
+  "telescope_zero_point": null,
+  "telescope_extinction_k": null,
+  "telescope_fit_star_count": 0,
+  "telescope_fit_rms_mag": null,
+  "telescope_fit_data_hash": null,
+  "telescope_pixel_scale_arcsec": null
+}

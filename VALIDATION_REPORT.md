@@ -1,0 +1,80 @@
+# LIGHTT v34.2 검증 보고서
+
+검증일: 2026-08-20
+
+## 자동 테스트
+
+현재 제작 컨테이너에서 최종 소스 기준:
+
+```text
+53 passed, 4 skipped
+```
+
+skip 4건은 제작 컨테이너에 Astropy가 설치되어 있지 않아 실행되지 않은 FITS/Astropy 통합 테스트입니다. 배포 `requirements.txt`에는 `astropy==8.0.1`이 포함되어 있으며 일반 설치 환경에서는 `python -m pip install -r requirements.txt`로 설치합니다.
+
+skip 대상:
+- FITS calibration 통합
+- FITS intensity-domain 통합
+- FITS end-to-end
+- Astropy RA/Dec → Alt/Az 변환
+
+## 정적/서버 검사
+
+- Python `compileall`: 통과
+- `node --check static/app.js`: 통과
+- FastAPI server smoke test: 통과
+- HTML id 중복: 0
+- JavaScript `$()` 참조 HTML id 누락: 0
+- 브라우저 blocking `alert/prompt/confirm`: 사용하지 않음
+- 분석 중 입력 잠금 및 전천 미리보기 race 방지 코드 검사: 통과
+
+## 회귀 테스트 핵심 항목
+
+- 장비 프로필 원본 망원경 기준 영상 지속 저장
+- 보고서식 Csys 전천→망원경 배경 환산
+- 현재 전천 카메라/ISO·Gain/크롭/Flat 조건이 기준과 다르면 Csys 정량 적용 거부
+- Csys 미보유 시 상대배경 fallback과 planning-only 처리
+- 점광원 zero point 기반 신호 예측
+- 확산천체 통합등급+각크기 기반 평균 표면밝기 근사
+- 협대역/다중대역에서 V등급 신호 모델을 계획용 근사로 강등
+- target SNR 변경 시 촬영 장수 변화와 단일노출 결정 분리
+- 현재 점광원 대상의 PSF peak fraction 기반 포화 상한
+- 과거 기준 시야 대표별 peak를 미래 세션 강제 상한으로 사용하지 않음
+- 보고서 기반 fisheye directional validation과 엄격한 angular-RMS 검증 분리
+- Stellarium 파싱, 음수 고도, 기준/현재 시각 정합 검증
+- 과거 기준 영상과 현재 Stellarium 시각이 30분 이상 달라도 장비 프로필 생성이 중단되지 않는 회귀 검증
+- 시간 불일치 시 오래된 Alt/Az 제거 및 시간 의존 보정 강등 검증
+- Stellarium `/api/main/time` Julian Day 설정 경로 검증
+- RAW/FITS ADU domain 및 sensor clipping 안전장치 관련 기존 회귀 테스트
+
+## 30 MP 합성 통합 smoke test
+
+`6720×4480` 16-bit 전천 TIFF와 저장된 망원경 기준 TIFF를 이용해 다음 경로를 실제 실행했습니다.
+
+`장비 프로필 생성 → 기준 전천 방향 배경 추출 → Csys 저장 → 현재 전천 분석 → 선택 천체 신호 모델 → SNR/포화/스택 → 11개 결과 artifact 생성`
+
+최종 재검사 기록:
+
+```text
+장비 프로필 생성        4.973 s
+현재 관측 세션 분석     3.833 s
+전체                     8.806 s
+Csys                     0.7289565
+Csys 적용 경로           c_sys_planning
+결과 artifact             11개
+```
+
+이 입력은 선형 RAW/FITS가 아닌 합성 TIFF이므로 프로그램이 의도대로 `planning_only`/낮은 신뢰도로 판정했습니다. 위 시간은 현재 제작 컨테이너의 합성 성능 측정이며 사용자 PC의 실행시간을 보증하지 않습니다.
+
+## 과학적 해석
+
+테스트 통과는 소프트웨어 흐름과 알려진 회귀 오류가 재발하지 않았음을 뜻합니다. 모든 실제 관측 환경에서 권장 노출의 절대 정확도를 보장한다는 의미는 아닙니다. 실제 보고서 역시 포화되지 않은 범위에서 예측 순신호와 실측 순신호의 대체적인 일치를 확인했지만, 모든 천체·계절·장비·광해 조건으로 일반화하지는 않습니다.
+
+특히 다음 경우는 프로그램이 정량값으로 과장하지 않고 `planning_only` 또는 낮은 신뢰도로 표시합니다.
+- Csys 부재/조건 불일치
+- 전천 Flat 부재
+- 기준 기기영점 부재 또는 근사
+- 확산천체 통합등급 기반 표면밝기 근사
+- 협대역 필터에서 V등급 사용
+- 렌더링 이미지 사용
+- 센서 clipping 근거 부족

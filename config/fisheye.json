@@ -1,0 +1,28 @@
+{
+  "mode": "calibrated_kannala_brandt",
+  "center_x": 3404.65,
+  "center_y": 2236.29,
+  "horizon_radius": null,
+  "north_offset_deg": 0.0,
+  "E": 1.45113886221352,
+  "a0": 3.039550787484548,
+  "eps": 0.15573660104475665,
+  "coefficients": [
+    0.0006570442685073471,
+    6.551887792961601e-12,
+    2.0295517049062713e-18,
+    1.9606857510657924e-26
+  ],
+  "coefficient_convention": "theta(r)=k1*r+k2*r^3+k3*r^5+k4*r^7; r is original sensor pixel distance",
+  "sensor_width": 6720,
+  "sensor_height": 4480,
+  "fit_star_count": 30,
+  "fit_rms_deg": null,
+  "fit_edge_rms_deg": null,
+  "calibration_date": null,
+  "camera_lens_id": "Canon EOS R + Sigma 8mm fisheye",
+  "note": "Yang et al. (2025) 방식 계수. 작품설명서에 방향 검증 최대오차 5 px가 기록되어 있어 방위각·고도 배경 조회에 사용합니다. angular RMS 자료는 없으므로 절대 픽셀 입체각 측광 검증과는 분리합니다.",
+  "validation_star_count": 30,
+  "validation_max_error_px": 5.0,
+  "validation_basis": "작품설명서: 30개 기준별 회귀 후 고도 10도·방위 30도 간격 검증점에서 모두 5 px 이하"
+}

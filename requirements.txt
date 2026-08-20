@@ -1,0 +1,10 @@
+fastapi==0.128.2
+uvicorn==0.48.0
+python-multipart==0.0.29
+numpy==2.3.5
+scipy==1.17.0
+astropy==8.0.1
+rawpy==0.27.0
+Pillow==12.2.0
+matplotlib==3.10.8
+photutils==2.3.0
