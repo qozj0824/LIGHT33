@@ -17,7 +17,7 @@ def main() -> None:
     index = client.get("/")
     javascript = client.get("/static/app.js")
     assert health.status_code == 200 and health.json()["ok"] is True
-    assert index.status_code == 200 and "LIGHTT v34" in index.text
+    assert index.status_code == 200 and "NØXIS" in index.text
     assert javascript.status_code == 200
     print("server smoke test: PASS")
 

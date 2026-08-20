@@ -1,1 +1,1 @@
-Runtime results are temporary.
+Generated results are stored here.

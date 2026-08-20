@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 import os
 import re
@@ -22,35 +21,29 @@ from fastapi.staticfiles import StaticFiles
 from lightt import __version__
 from lightt.io import SUPPORTED_EXTENSIONS, infer_intensity_domain, load_image
 from lightt.models import AnalysisSettings, CalibrationSet
-from lightt.equipment import EquipmentProfile, create_equipment_profile, delete_profile, list_profiles, load_profile
+from lightt.equipment import create_equipment_profile, delete_profile, list_profiles, load_profile
 from lightt.session import run_session_analysis
 from lightt.photometry import propose_extended_rois
 from lightt.pipeline import run_analysis
-from lightt.stellarium import first_recursive, import_selected as stellarium_import_selected
-from lightt.stellarium import normalize_selected_object
+from lightt.stellarium import first_recursive, normalize_selected_object
+from lightt.stellarium import import_selected as stellarium_import_selected
 from lightt.stellarium import ping as stellarium_ping_service
 from lightt.stellarium import set_simulation_time as stellarium_set_time_service
 from lightt.time_utils import image_observation_time_utc
 from lightt.visualization import save_scope_preview
 
 ROOT = Path(__file__).resolve().parent
-HOSTED_MODE = os.environ.get("LIGHTT_HOSTED", "0").strip().lower() in {"1", "true", "yes", "on"}
-PROFILE_STORAGE = os.environ.get("LIGHTT_PROFILE_STORAGE", "browser" if HOSTED_MODE else "server").strip().lower()
-DATA_ROOT = Path(os.environ.get("LIGHTT_DATA_ROOT", str(Path("/tmp/lightt") if HOSTED_MODE else ROOT))).resolve()
-UPLOAD_ROOT = DATA_ROOT / "uploads"
-RESULT_ROOT = DATA_ROOT / "results"
-PROFILE_ROOT = DATA_ROOT / "profiles"
+UPLOAD_ROOT = ROOT / "uploads"
+RESULT_ROOT = ROOT / "results"
+PROFILE_ROOT = ROOT / "profiles"
 STATIC_ROOT = ROOT / "static"
-UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
-RESULT_ROOT.mkdir(parents=True, exist_ok=True)
-PROFILE_ROOT.mkdir(parents=True, exist_ok=True)
+UPLOAD_ROOT.mkdir(exist_ok=True)
+RESULT_ROOT.mkdir(exist_ok=True)
+PROFILE_ROOT.mkdir(exist_ok=True)
 
-# Render Free has 512 MB RAM. RAW files are decoded to a half-resolution green plane,
-# and the all-sky map is further decimated internally, but public hosting still needs
-# conservative request limits to avoid one user exhausting the process.
-MAX_UPLOAD_BYTES = int(os.environ.get("LIGHTT_MAX_UPLOAD_BYTES", str(180 * 1024 * 1024 if HOSTED_MODE else 1024 * 1024 * 1024)))
-MAX_REQUEST_BYTES = int(os.environ.get("LIGHTT_MAX_REQUEST_BYTES", str(260 * 1024 * 1024 if HOSTED_MODE else 3 * 1024**3)))
-MAX_IMAGE_PIXELS = int(os.environ.get("LIGHTT_MAX_IMAGE_PIXELS", str(45_000_000 if HOSTED_MODE else 120_000_000)))
+MAX_UPLOAD_BYTES = int(os.environ.get("LIGHTT_MAX_UPLOAD_BYTES", str(1024 * 1024 * 1024)))
+MAX_REQUEST_BYTES = int(os.environ.get("LIGHTT_MAX_REQUEST_BYTES", str(3 * 1024**3)))
+MAX_IMAGE_PIXELS = int(os.environ.get("LIGHTT_MAX_IMAGE_PIXELS", str(120_000_000)))
 ANALYSIS_CONCURRENCY = max(1, int(os.environ.get("LIGHTT_ANALYSIS_CONCURRENCY", "1")))
 ANALYSIS_SEMAPHORE = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
 TOKEN_PATTERN = re.compile(r"^[a-f0-9]{24}$")
@@ -61,7 +54,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="LIGHTT hosted observation planner", version=__version__, lifespan=lifespan)
+app = FastAPI(title="NØXIS", version=__version__, lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_ROOT), name="static")
 app.mount("/results", StaticFiles(directory=RESULT_ROOT), name="results")
 
@@ -91,17 +84,35 @@ def health() -> dict[str, object]:
         "ok": True,
         "version": __version__,
         "analysis_concurrency": ANALYSIS_CONCURRENCY,
-        "hosted": HOSTED_MODE,
-        "profile_storage": PROFILE_STORAGE,
-        "max_upload_bytes": MAX_UPLOAD_BYTES,
-        "max_request_bytes": MAX_REQUEST_BYTES,
-        "max_image_pixels": MAX_IMAGE_PIXELS,
     }
 
 
 @app.get("/version")
 def version() -> dict[str, str]:
-    return {"version": __version__, "name": "LIGHTT astronomical observation planner"}
+    return {"version": __version__, "name": "NØXIS astrophotography planner"}
+
+
+@app.post("/api/stellarium/normalize")
+def stellarium_normalize(
+    payload: Annotated[dict[str, object], Body()],
+) -> dict[str, object]:
+    """Normalize browser-fetched Stellarium data without proxying localhost through Render."""
+    status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
+    info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    if not info or "raw_text" in info:
+        fallback = first_recursive(
+            status,
+            ["selectioninfo", "selectionInfo", "selectedObject", "objectInfo"],
+        )
+        info = fallback if isinstance(fallback, dict) else {}
+    if not info:
+        raise HTTPException(
+            status_code=422,
+            detail="선택 천체 정보를 읽지 못했습니다. Stellarium에서 천체를 선택하세요.",
+        )
+    result = normalize_selected_object(info, status)
+    result.update({"ok": True, "warnings": []})
+    return result
 
 
 @app.get("/api/stellarium/ping")
@@ -123,37 +134,6 @@ def stellarium_import(base_url: str = "http://127.0.0.1:8090") -> dict[str, obje
             status_code=502,
             detail=f"Stellarium 연결 또는 선택 천체 가져오기에 실패했습니다: {type(exc).__name__}",
         ) from exc
-
-
-@app.post("/api/stellarium/normalize")
-def stellarium_normalize(payload: dict[str, object] = Body(...)) -> dict[str, object]:
-    """Normalize raw Stellarium JSON fetched by the user's browser.
-
-    On a public hosted deployment the Render server cannot reach the user's
-    127.0.0.1. The browser therefore reads Stellarium directly (with the
-    Remote Control CORS option enabled) and sends only JSON metadata here.
-    """
-    info = payload.get("info")
-    status = payload.get("status")
-    status_dict = status if isinstance(status, dict) else {}
-    info_dict = info if isinstance(info, dict) else {}
-    if not info_dict or "raw_text" in info_dict:
-        fallback = first_recursive(
-            status_dict,
-            ["selectioninfo", "selectionInfo", "selectedObject", "objectInfo"],
-        )
-        if isinstance(fallback, dict):
-            info_dict = fallback
-        else:
-            raise HTTPException(
-                status_code=422,
-                detail="선택된 천체 정보를 읽지 못했습니다. Stellarium에서 천체를 선택하세요.",
-            )
-    result = normalize_selected_object(info_dict, status_dict)
-    result.update({"ok": True, "warnings": []})
-    if result.get("ra_deg") is None and result.get("alt_deg") is None:
-        result["warnings"].append("좌표를 해석하지 못했습니다. Stellarium 선택 정보를 확인하세요.")
-    return result
 
 
 @app.post("/api/stellarium/set-time")
@@ -358,14 +338,7 @@ async def _resolve_main_file(
     budget: UploadBudget,
 ) -> Path:
     if token:
-        try:
-            return _inspect_path(token, role)
-        except HTTPException as exc:
-            # Free Render instances can spin down after inactivity, which clears
-            # the preview token's ephemeral file. The browser sends the original
-            # file again during final analysis so we can recover transparently.
-            if upload is None or exc.status_code not in {404, 410}:
-                raise
+        return _inspect_path(token, role)
     if upload is None:
         raise HTTPException(status_code=400, detail=f"{role} 영상 파일이 필요합니다.")
     return await _save_upload(upload, job_dir, role, budget)
@@ -373,8 +346,6 @@ async def _resolve_main_file(
 
 @app.get("/api/equipment/profiles")
 def equipment_profiles() -> dict[str, object]:
-    if PROFILE_STORAGE == "browser":
-        return {"profiles": [], "storage": "browser"}
     profiles = list_profiles(PROFILE_ROOT)
     return {
         "profiles": [
@@ -400,8 +371,6 @@ def equipment_profiles() -> dict[str, object]:
 
 @app.get("/api/equipment/profiles/{profile_id}")
 def equipment_profile_detail(profile_id: str) -> dict[str, object]:
-    if PROFILE_STORAGE == "browser":
-        raise HTTPException(status_code=404, detail="웹 배포판의 장비 프로필은 이 브라우저에 저장됩니다.")
     try:
         return load_profile(PROFILE_ROOT, profile_id).to_dict()
     except ValueError as exc:
@@ -410,8 +379,6 @@ def equipment_profile_detail(profile_id: str) -> dict[str, object]:
 
 @app.delete("/api/equipment/profiles/{profile_id}")
 def equipment_profile_delete(profile_id: str) -> dict[str, object]:
-    if PROFILE_STORAGE == "browser":
-        return {"ok": True, "profile_id": profile_id, "storage": "browser"}
     try:
         delete_profile(PROFILE_ROOT, profile_id)
         return {"ok": True, "profile_id": profile_id}
@@ -521,7 +488,7 @@ async def equipment_profile_create(
         async with ANALYSIS_SEMAPHORE:
             profile = await run_in_threadpool(
                 create_equipment_profile,
-                profile_root=(job_dir / "browser_profile") if PROFILE_STORAGE == "browser" else PROFILE_ROOT,
+                profile_root=PROFILE_ROOT,
                 profile_name=profile_name,
                 scope_path=scope_path,
                 reference_target=target,
@@ -557,31 +524,6 @@ async def equipment_profile_create(
         shutil.rmtree(job_dir, ignore_errors=True)
 
 
-def _profile_from_json(raw_text: str) -> EquipmentProfile:
-    if len(raw_text.encode("utf-8")) > 750_000:
-        raise HTTPException(status_code=413, detail="장비 프로필 데이터가 허용 크기를 초과했습니다.")
-    try:
-        raw = json.loads(raw_text)
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail="장비 프로필 JSON이 올바르지 않습니다.") from exc
-    if not isinstance(raw, dict):
-        raise HTTPException(status_code=422, detail="장비 프로필 형식이 올바르지 않습니다.")
-    try:
-        profile = EquipmentProfile.from_dict(raw)
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail="장비 프로필 필드가 올바르지 않습니다.") from exc
-    if not profile.profile_id or len(profile.profile_id) > 64:
-        raise HTTPException(status_code=422, detail="장비 프로필 ID가 올바르지 않습니다.")
-    for label, value, low, high in (
-        ("Gain", profile.gain_e_per_adu, 0.000001, 1000),
-        ("읽기잡음", profile.read_noise_e, 0, 1000),
-        ("암전류", profile.dark_current_e_per_pix_sec, 0, 10000),
-        ("대기소광 계수", profile.extinction_k_mag_per_airmass, 0, 5),
-    ):
-        _finite_range(label, float(value), low, high)
-    return profile
-
-
 @app.post("/api/session/analyze")
 async def session_analyze(
     allsky: Annotated[UploadFile | None, File()] = None,
@@ -590,7 +532,6 @@ async def session_analyze(
     allsky_dark: Annotated[list[UploadFile] | None, File()] = None,
     allsky_flat: Annotated[list[UploadFile] | None, File()] = None,
     profile_id: Annotated[str, Form()] = "",
-    profile_json: Annotated[str, Form()] = "",
     target_name: Annotated[str, Form()] = "",
     target_object_type: Annotated[str, Form()] = "unknown",
     target_mode: Annotated[str, Form()] = "extended",
@@ -623,15 +564,12 @@ async def session_analyze(
     manual_target_mag: Annotated[float | None, Form()] = None,
     manual_surface_brightness_mag_arcsec2: Annotated[float | None, Form()] = None,
 ) -> JSONResponse:
-    if profile_json.strip():
-        profile = _profile_from_json(profile_json)
-    else:
-        if not profile_id:
-            raise HTTPException(status_code=422, detail="장비 프로필을 선택하세요.")
-        try:
-            profile = load_profile(PROFILE_ROOT, profile_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not profile_id:
+        raise HTTPException(status_code=422, detail="장비 프로필을 선택하세요.")
+    try:
+        profile = load_profile(PROFILE_ROOT, profile_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     if target_mode not in {"point", "extended"}:
         raise HTTPException(status_code=422, detail="Stellarium 대상 유형이 올바르지 않습니다.")
     if target_alt_deg is None or target_az_deg is None:
@@ -915,4 +853,4 @@ async def analyze(
 
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.environ.get("PORT", "8010")), reload=False)
+    uvicorn.run("app:app", host="127.0.0.1", port=8010, reload=False)

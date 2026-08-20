@@ -29,6 +29,7 @@ def test_basic_and_restored_feature_ui_tokens() -> None:
         "/api/equipment/profiles",
         "/api/session/analyze",
         "/api/stellarium/normalize",
+        "/api/main/status",
         "allsky_coordinate_overlay",
         "sky_polar_map",
         "sky_reliability",
@@ -69,3 +70,31 @@ def test_stellarium_ping_endpoint_uses_service(monkeypatch) -> None:
     )
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+
+def test_stellarium_normalize_endpoint() -> None:
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/api/stellarium/normalize",
+        json={
+            "status": {
+                "location": {"latitude": 37.5, "longitude": 127.0, "altitude": 50},
+                "time": {"utc": "2026-08-20T12:00:00Z"},
+            },
+            "info": {
+                "name": "M 42",
+                "type": "Nebula",
+                "alt": 45.0,
+                "az": 180.0,
+                "ra": "5h 35m 17s",
+                "dec": "-5d 23m 28s",
+                "vmag": 4.0,
+                "size-dd": 1.0,
+            },
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["name"] == "M 42"
+    assert payload["target_mode"] == "extended"
+    assert payload["alt_deg"] == 45.0

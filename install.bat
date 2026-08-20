@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-echo [LIGHTT] Python package installation
+echo [NØXIS] Python package installation
 python -m pip install --upgrade pip
 if errorlevel 1 goto :error
 python -m pip install -r requirements.txt

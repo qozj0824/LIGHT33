@@ -1,7 +1,6 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const LOCAL_PROFILE_KEY = "lightt.equipmentProfiles.v35";
 const state = {
   allskyToken: null,
   allskyMetadata: null,
@@ -16,19 +15,18 @@ const state = {
   referenceScopeCaptureTimeUtc: null,
   referenceScopeInspectSequence: 0,
   referenceScopeInspectController: null,
-  serverConfig: { hosted: false, profile_storage: "server" },
 };
 
 const ARTIFACT_INFO = {
-  sky_polar_map: ["원형 방향별 하늘 배경 지도", "중심은 천정, 외곽은 저고도 방향입니다."],
-  allsky_coordinate_overlay: ["전천 좌표 오버레이", "분석 영역과 선택 천체 방향을 원본 영상에서 확인합니다."],
-  sky_relative_map: ["상대 하늘 배경 지도", "전천 중앙값에 대한 방향별 상대 밝기입니다."],
-  sky_reliability: ["전천 셀 신뢰도", "good/caution/low/blocked/missing 판정을 표시합니다."],
-  sky_altitude_profiles: ["고도별 방위 프로파일", "고도에 따른 방위별 배경 변화입니다."],
-  sky_map: ["방위각–고도 배경 ADU 지도", "분석용 직사각형 좌표 지도입니다."],
-  sky_distribution: ["배경값 분포", "유효 하늘 셀의 배경 분포입니다."],
-  allsky_preview: ["전천 영상", "분석에 사용한 전천 영상 미리보기입니다."],
-  exposure_snr_curve: ["노출시간–SNR 모델", "저장된 장비 프로필과 선택 천체 광도 모델로 계산합니다."],
+  sky_polar_map: ["방향별 하늘 배경", ""],
+  allsky_coordinate_overlay: ["전천 좌표", ""],
+  sky_relative_map: ["상대 배경", ""],
+  sky_reliability: ["셀 신뢰도", ""],
+  sky_altitude_profiles: ["고도별 프로파일", ""],
+  sky_map: ["방위각–고도 ADU", ""],
+  sky_distribution: ["배경 분포", ""],
+  allsky_preview: ["전천 영상", ""],
+  exposure_snr_curve: ["노출시간–SNR", ""],
 };
 
 function valueOrNull(id) {
@@ -51,17 +49,54 @@ function formatSeconds(value) {
 
 function escapeText(value) { return String(value ?? ""); }
 
-async function checkServer() {
-  try {
-    const response = await fetch("/health");
-    const payload = await response.json();
-    state.serverConfig = payload || state.serverConfig;
-    $("serverStatus").textContent = payload.ok
-      ? `${payload.hosted ? "웹 서버" : "서버"} 정상 · v${payload.version}`
-      : "서버 오류";
-  } catch {
-    $("serverStatus").textContent = "서버 연결 실패";
-  }
+function normalizeStellariumUrl(rawValue) {
+  let raw = String(rawValue || "").trim();
+  if (!raw) raw = "http://127.0.0.1:8090";
+  if (!/^https?:\/\//i.test(raw)) raw = `http://${raw}`;
+  const url = new URL(raw);
+  if (!/^https?:$/.test(url.protocol)) throw new Error("주소 확인");
+  return `${url.protocol}//${url.host}`;
+}
+
+async function stellariumRequest(endpoint, options = {}) {
+  const base = normalizeStellariumUrl($("stellariumUrl").value);
+  const response = await fetch(`${base}${endpoint}`, {
+    ...options,
+    mode: "cors",
+    credentials: "include",
+    headers: {
+      Accept: "application/json,text/plain;q=0.9,*/*;q=0.5",
+      ...(options.headers || {}),
+    },
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!text.trim()) return {};
+  try { return JSON.parse(text); } catch { return { raw_text: text }; }
+}
+
+function stellariumFailureMessage(error) {
+  const message = String(error?.message || "");
+  if (/401|403/.test(message)) return "인증 확인";
+  if (/Failed to fetch|NetworkError|Load failed|fetch/i.test(message)) return "Remote Control / CORS 확인";
+  return message || "연결 실패";
+}
+
+async function normalizeStellariumPayload(info, status) {
+  const response = await fetch("/api/stellarium/normalize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ info, status }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.detail || "천체 정보 해석 실패");
+  return payload;
+}
+
+function dateToJulianDay(iso) {
+  const milliseconds = Date.parse(iso);
+  if (!Number.isFinite(milliseconds)) throw new Error("촬영시각 확인");
+  return milliseconds / 86400000 + 2440587.5;
 }
 
 function renderMetadata(metadata) {
@@ -85,7 +120,7 @@ async function inspectAllsky(file) {
   if (!file) {
     $("allskyName").textContent = "파일 선택";
     $("allskyPreviewStatus").textContent = "대기 중";
-    $("allskyMetadata").textContent = "파일을 선택하면 형식·크기·노출시간을 확인합니다.";
+    $("allskyMetadata").textContent = "";
     $("allskyPreview").removeAttribute("src");
     updateReadyState();
     return;
@@ -151,8 +186,8 @@ async function inspectReferenceScope(file) {
   $("setStellariumReferenceTime").disabled = true;
   if (!file) {
     $("profileScopeName").textContent = "파일 선택";
-    $("profileScopeMetadata").textContent = "파일을 선택하면 촬영시각과 메타데이터를 자동 확인합니다.";
-    $("profileTimeStatus").textContent = "촬영시각이 달라도 장비 프로필 생성 자체는 중단하지 않습니다.";
+    $("profileScopeMetadata").textContent = "";
+    $("profileTimeStatus").textContent = "";
     return;
   }
   $("profileScopeName").textContent = file.name;
@@ -179,71 +214,41 @@ async function inspectReferenceScope(file) {
       $("captureGainSetting").value = `Gain/ISO ${payload.metadata.gain_setting}`;
     }
     $("profileTimeStatus").textContent = payload.capture_time_utc
-      ? "촬영시각을 확인했습니다. Stellarium 시각이 달라도 RA/Dec가 있으면 서버가 촬영 당시 Alt/Az를 재계산합니다."
-      : "촬영시각의 시간대를 확정하지 못했습니다. 프로필은 만들 수 있지만 Csys·기준 대기질량 등 시간 의존 보정은 제한됩니다.";
+      ? "촬영시각 확인"
+      : "시간대 미확정";
   } catch (error) {
     if (error?.name === "AbortError" || sequence !== state.referenceScopeInspectSequence) return;
     $("profileScopeMetadata").textContent = error.message;
-    $("profileTimeStatus").textContent = "메타데이터를 읽지 못해도 기준 영상 자체는 프로필 생성 단계에서 다시 검사합니다.";
+    $("profileTimeStatus").textContent = "메타데이터 확인 실패";
   } finally {
     if (sequence === state.referenceScopeInspectSequence) state.referenceScopeInspectController = null;
   }
 }
 
-function normalizeStellariumBase(rawValue) {
-  const raw = (rawValue || "http://127.0.0.1:8090").trim();
-  const url = new URL(raw.includes("://") ? raw : `http://${raw}`);
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Stellarium 주소는 http/https만 사용할 수 있습니다.');
-  if (url.username || url.password || (url.pathname && url.pathname !== '/') || url.search || url.hash) {
-    throw new Error('Stellarium 기본 주소에는 경로·계정·query를 넣지 마세요.');
-  }
-  return url.origin;
-}
-
-function stellariumCorsHint() {
-  return 'Stellarium Remote Control에서 CORS를 켜고 허용 Origin을 이 사이트 주소로 설정하세요. 테스트할 때만 *를 사용할 수 있습니다.';
-}
-
-async function fetchLocalStellarium(path, options = {}) {
-  const base = normalizeStellariumBase($("stellariumUrl").value);
-  const host = new URL(base).hostname;
-  const targetAddressSpace = (host === '127.0.0.1' || host === 'localhost' || host === '::1') ? 'loopback' : 'local';
-  const requestOptions = {
-    mode: 'cors',
-    cache: 'no-store',
-    ...options,
-    targetAddressSpace,
-  };
-  return fetch(`${base}${path}`, requestOptions);
-}
-
-async function setStellariumTime(observationTimeUtc, pause = true, label = "기준 촬영시각") {
-  $("profileTimeStatus").textContent = `Stellarium을 ${label}으로 설정하는 중`;
+async function setStellariumTime(observationTimeUtc, pause = true, label = "기준 시각") {
+  $("profileTimeStatus").textContent = `${label} 적용 중`;
   try {
-    const date = new Date(observationTimeUtc);
-    if (Number.isNaN(date.getTime())) throw new Error('촬영시각을 UTC 시각으로 해석하지 못했습니다.');
-    const julianDay = date.getTime() / 86400000 + 2440587.5;
-    const timerate = pause ? 0 : (1 / 86400);
-    const body = new URLSearchParams({ time: julianDay.toFixed(10), timerate: String(timerate) });
-    const response = await fetchLocalStellarium('/api/main/time', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+    const jday = dateToJulianDay(observationTimeUtc);
+    const body = new URLSearchParams({
+      time: jday.toFixed(10),
+      timerate: pause ? "0" : String(1 / 86400),
+    });
+    await stellariumRequest("/api/main/time", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
       body,
     });
-    const text = await response.text();
-    if (!response.ok) throw new Error(text || `HTTP ${response.status}`);
-    $("profileTimeStatus").textContent = pause
-      ? `Stellarium을 기준 촬영시각(${date.toISOString()})으로 맞췄습니다. 필요하면 기준 천체를 다시 가져오세요.`
-      : 'Stellarium을 현재 시각으로 복귀시키고 시간 흐름을 재개했습니다.';
-    $("stellariumStatus").textContent = 'Stellarium 시각 설정 완료';
+    $("profileTimeStatus").textContent = pause ? "기준 시각 적용됨" : "현재 시각 적용됨";
+    $("stellariumStatus").textContent = "연결됨";
+    $("stellariumStatus").className = "status-text ok";
   } catch (error) {
-    $("profileTimeStatus").textContent = `Stellarium 시각 설정 실패: ${error.message} · ${stellariumCorsHint()}`;
+    $("profileTimeStatus").textContent = `실패 · ${stellariumFailureMessage(error)}`;
   }
 }
 
 async function setStellariumReferenceTime() {
   if (!state.referenceScopeCaptureTimeUtc) {
-    $("profileTimeStatus").textContent = "기준 영상에서 시간대가 확정된 촬영시각을 읽지 못했습니다.";
+    $("profileTimeStatus").textContent = "촬영시각 없음";
     return;
   }
   await setStellariumTime(state.referenceScopeCaptureTimeUtc, true, "기준 촬영시각");
@@ -267,7 +272,7 @@ function renderTargetCard(target, reference = false) {
   const card = reference ? $("referenceTargetCard") : $("targetCard");
   if (!target) {
     card.className = "target-card empty";
-    card.textContent = reference ? "기준 천체를 아직 가져오지 않았습니다." : "관측 대상이 선택되지 않았습니다.";
+    card.textContent = "선택 안 됨";
     return;
   }
   card.className = "target-card";
@@ -280,57 +285,47 @@ function updateTargetAltitudeStatus() {
   const target = state.target;
   if (!target || !Number.isFinite(Number(target.alt_deg))) {
     box.className = "safety-notice neutral";
-    box.querySelector("span").textContent = "선택 천체의 고도를 확인할 수 없습니다.";
+    box.querySelector("span").textContent = "대상 선택 필요";
     return;
   }
   const alt = Number(target.alt_deg);
   const minAlt = Number($("minimumSkyAltitude").value || 15);
   if (alt < 0) {
     box.className = "safety-notice danger";
-    box.querySelector("span").textContent = `현재 고도 ${alt.toFixed(2)}° — 지평선 아래이므로 관측 계획을 계산하지 않습니다.`;
+    box.querySelector("span").textContent = `${alt.toFixed(2)}° · 지평선 아래`;
   } else if (alt < minAlt) {
     box.className = "safety-notice warning";
-    box.querySelector("span").textContent = `현재 고도 ${alt.toFixed(2)}° — 최저 분석 고도 ${minAlt.toFixed(1)}°보다 낮습니다.`;
+    box.querySelector("span").textContent = `${alt.toFixed(2)}° · 최저 ${minAlt.toFixed(1)}° 미만`;
   } else {
     box.className = "safety-notice good";
-    box.querySelector("span").textContent = `현재 고도 ${alt.toFixed(2)}° — 전천 배경 조회 가능 범위입니다.`;
+    box.querySelector("span").textContent = `${alt.toFixed(2)}° · 분석 가능`;
   }
   updateReadyState();
 }
 
 async function stellariumPing() {
-  $("stellariumStatus").textContent = "브라우저에서 Stellarium 연결 확인 중";
+  const status = $("stellariumStatus");
+  status.className = "status-text";
+  status.textContent = "연결 중";
   try {
-    const response = await fetchLocalStellarium('/api/main/status');
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    await response.json();
-    $("stellariumStatus").textContent = "Stellarium 연결 정상 · 브라우저 직접 연결";
+    await stellariumRequest("/api/main/status");
+    status.textContent = "연결됨";
+    status.className = "status-text ok";
   } catch (error) {
-    $("stellariumStatus").textContent = `연결 실패: ${error.message} · ${stellariumCorsHint()}`;
+    status.textContent = `연결 실패 · ${stellariumFailureMessage(error)}`;
+    status.className = "status-text error";
   }
 }
 
 async function importStellariumTarget(reference = false) {
-  const statusLabel = $("stellariumStatus");
-  statusLabel.textContent = reference ? "기준 천체 정보 가져오는 중" : "선택 천체 정보 가져오는 중";
+  const statusText = $("stellariumStatus");
+  statusText.className = "status-text";
+  statusText.textContent = "가져오는 중";
   try {
-    const statusResponse = await fetchLocalStellarium('/api/main/status');
-    if (!statusResponse.ok) throw new Error(`status HTTP ${statusResponse.status}`);
-    const statusRaw = await statusResponse.json();
-    let infoRaw = {};
-    try {
-      const infoResponse = await fetchLocalStellarium('/api/objects/info?format=json');
-      if (infoResponse.ok) infoRaw = await infoResponse.json();
-    } catch (_) {
-      infoRaw = {};
-    }
-    const normalizeResponse = await fetch('/api/stellarium/normalize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ info: infoRaw, status: statusRaw }),
-    });
-    const payload = await normalizeResponse.json();
-    if (!normalizeResponse.ok) throw new Error(payload.detail || '가져오기 실패');
+    const status = await stellariumRequest("/api/main/status");
+    let info = {};
+    try { info = await stellariumRequest("/api/objects/info?format=json"); } catch { info = {}; }
+    const payload = await normalizeStellariumPayload(info, status);
     const target = {
       name: payload.name,
       object_type: payload.object_type,
@@ -348,14 +343,16 @@ async function importStellariumTarget(reference = false) {
     if (reference) {
       state.referenceTarget = target;
       renderTargetCard(target, true);
-      statusLabel.textContent = `기준 천체: ${target.name}`;
+      statusText.textContent = `기준 · ${target.name}`;
     } else {
       state.target = target;
       renderTargetCard(target, false);
-      statusLabel.textContent = `관측 대상: ${target.name}`;
+      statusText.textContent = target.name;
     }
+    statusText.className = "status-text ok";
   } catch (error) {
-    statusLabel.textContent = `가져오기 실패: ${error.message} · ${stellariumCorsHint()}`;
+    statusText.textContent = `가져오기 실패 · ${stellariumFailureMessage(error)}`;
+    statusText.className = "status-text error";
   }
   updateReadyState();
 }
@@ -367,66 +364,6 @@ function appendFiles(form, field, input) {
 function addMaybe(form, key, value) {
   if (value !== null && value !== undefined && value !== "" && !(typeof value === "number" && !Number.isFinite(value))) {
     form.append(key, String(value));
-  }
-}
-
-function readLocalProfiles() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(LOCAL_PROFILE_KEY) || '[]');
-    if (!Array.isArray(raw)) return [];
-    return raw.filter((item) => item && typeof item === 'object' && typeof item.profile_id === 'string');
-  } catch {
-    return [];
-  }
-}
-
-function writeLocalProfiles(profiles) {
-  localStorage.setItem(LOCAL_PROFILE_KEY, JSON.stringify(profiles.slice(0, 50)));
-}
-
-function saveLocalProfile(profile) {
-  const profiles = readLocalProfiles().filter((item) => item.profile_id !== profile.profile_id);
-  profiles.unshift(profile);
-  writeLocalProfiles(profiles);
-}
-
-function selectedProfile() {
-  const id = $("equipmentProfile").value;
-  return state.profiles.find((item) => item.profile_id === id) || null;
-}
-
-function exportSelectedProfile() {
-  const profile = selectedProfile();
-  if (!profile) {
-    $("profileCreateStatus").textContent = '내보낼 장비 프로필을 선택하세요.';
-    return;
-  }
-  const blob = new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `LIGHTT_profile_${(profile.name || profile.profile_id).replace(/[^0-9A-Za-z가-힣._-]+/g, '_')}.json`;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-  $("profileCreateStatus").textContent = '장비 프로필 JSON을 내보냈습니다.';
-}
-
-async function importProfileFile(file) {
-  if (!file) return;
-  try {
-    const raw = JSON.parse(await file.text());
-    if (!raw || typeof raw !== 'object' || typeof raw.profile_id !== 'string' || !raw.name) {
-      throw new Error('LIGHTT 장비 프로필 JSON 형식이 아닙니다.');
-    }
-    saveLocalProfile(raw);
-    await loadProfiles(raw.profile_id);
-    $("profileCreateStatus").textContent = `${raw.name} 프로필을 이 브라우저에 가져왔습니다.`;
-  } catch (error) {
-    $("profileCreateStatus").textContent = `프로필 가져오기 실패: ${error.message}`;
-  } finally {
-    $("importProfileFile").value = '';
   }
 }
 
@@ -480,14 +417,13 @@ async function createEquipmentProfile() {
 
   state.creatingProfile = true;
   $("createProfile").disabled = true;
-  $("profileCreateStatus").textContent = "기준 영상 측광·포화·장비 응답을 분석하는 중";
+  $("profileCreateStatus").textContent = "프로필 분석 중";
   try {
     const response = await fetch("/api/equipment/profiles/create", { method: "POST", body: form });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "프로필 생성 실패");
-    const warningText = Array.isArray(payload.warnings) && payload.warnings.length ? ` · 경고 ${payload.warnings.length}건` : "";
-    saveLocalProfile(payload);
-    $("profileCreateStatus").textContent = `프로필 생성 완료 · 이 브라우저에 저장 · 신뢰도 ${payload.confidence}${warningText}`;
+    const warningText = Array.isArray(payload.warnings) && payload.warnings.length ? ` · 확인 ${payload.warnings.length}` : "";
+    $("profileCreateStatus").textContent = `생성 완료 · ${payload.confidence}${warningText}`;
     await loadProfiles(payload.profile_id);
   } catch (error) {
     $("profileCreateStatus").textContent = `프로필 생성 실패: ${error.message}`;
@@ -522,7 +458,9 @@ async function deleteSelectedProfile() {
   $("deleteProfile").disabled = true;
   $("deleteProfile").textContent = "삭제 중";
   try {
-    writeLocalProfiles(readLocalProfiles().filter((item) => item.profile_id !== id));
+    const response = await fetch(`/api/equipment/profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
     $("profileCreateStatus").textContent = `${profile?.name || "장비 프로필"} 삭제 완료`;
     await loadProfiles();
   } catch (error) {
@@ -535,16 +473,17 @@ async function deleteSelectedProfile() {
 
 async function loadProfiles(selectId = null) {
   try {
-    state.profiles = readLocalProfiles();
+    const response = await fetch("/api/equipment/profiles");
+    const payload = await response.json();
+    state.profiles = payload.profiles || [];
     const select = $("equipmentProfile");
     select.innerHTML = "";
     if (!state.profiles.length) {
       const option = document.createElement("option");
       option.value = "";
-      option.textContent = "이 브라우저에 저장된 장비 프로필 없음";
+      option.textContent = "등록된 장비 프로필 없음";
       select.appendChild(option);
-      $("profileRequirement").textContent = "먼저 장비 프로필을 등록하거나 JSON 프로필을 가져오세요.";
-      $("profileRequirement").classList.add("warning-text");
+
     } else {
       state.profiles.forEach((profile) => {
         const option = document.createElement("option");
@@ -553,12 +492,12 @@ async function loadProfiles(selectId = null) {
         select.appendChild(option);
       });
       if (selectId && state.profiles.some((item) => item.profile_id === selectId)) select.value = selectId;
-      $("profileRequirement").textContent = `${state.profiles.length}개 장비 프로필 · 현재 브라우저에 저장됨`;
-      $("profileRequirement").classList.remove("warning-text");
+
     }
     renderSelectedProfile();
   } catch {
-    $("profileRequirement").textContent = "브라우저 장비 프로필을 불러오지 못했습니다.";
+    const select = $("equipmentProfile");
+    select.innerHTML = '<option value="">프로필 불러오기 실패</option>';
   }
   updateReadyState();
 }
@@ -571,14 +510,13 @@ function renderSelectedProfile() {
     box.innerHTML = "<strong>장비 프로필</strong><span>프로필을 선택하세요.</span>";
     return;
   }
-  const calibration = profile.c_sys_quality === "good" ? "Csys 보정" : "상대배경 보정";
+  const calibration = profile.c_sys_quality === "good" ? "Csys" : "상대배경";
   box.innerHTML = "";
   const strong = document.createElement("strong");
   strong.textContent = profile.name;
   const span = document.createElement("span");
   const gainLabel = profile.capture_gain_setting ? ` · ${profile.capture_gain_setting}` : "";
-  const noiseLabel = profile.noise_parameters_confirmed ? "센서 물성 확인" : "센서 물성 미확인";
-  span.textContent = `${profile.telescope_name || "망원경 미기입"} · ${profile.camera_name || "카메라 미기입"}${gainLabel} · ${calibration} · 기기영점 ${profile.zero_point_quality} · ${noiseLabel}`;
+  span.textContent = `${profile.telescope_name || "망원경"} · ${profile.camera_name || "카메라"}${gainLabel} · ${calibration}`;
   box.append(strong, span);
 }
 
@@ -586,12 +524,12 @@ function updateReadyState() {
   const targetGood = state.target && Number.isFinite(Number(state.target.alt_deg)) && Number(state.target.alt_deg) >= Number($("minimumSkyAltitude").value || 15);
   const ready = Boolean(state.allskyToken && $("equipmentProfile").value && targetGood && !state.analyzing);
   $("analyzeButton").disabled = !ready;
-  if (state.analyzing) $("readyStatus").textContent = "분석 수행 중";
-  else if (!state.allskyToken) $("readyStatus").textContent = "전천 영상을 입력하세요.";
-  else if (!state.target) $("readyStatus").textContent = "Stellarium에서 관측 대상을 가져오세요.";
-  else if (!targetGood) $("readyStatus").textContent = "선택 천체가 현재 분석 가능한 고도에 있지 않습니다.";
-  else if (!$("equipmentProfile").value) $("readyStatus").textContent = "장비 프로필을 선택하세요.";
-  else $("readyStatus").textContent = "분석 준비 완료";
+  if (state.analyzing) $("readyStatus").textContent = "분석 중";
+  else if (!state.allskyToken) $("readyStatus").textContent = "전천 영상 필요";
+  else if (!state.target) $("readyStatus").textContent = "관측 대상 필요";
+  else if (!targetGood) $("readyStatus").textContent = "대상 고도 확인";
+  else if (!$("equipmentProfile").value) $("readyStatus").textContent = "장비 프로필 필요";
+  else $("readyStatus").textContent = "준비 완료";
 }
 
 function setSessionLocked(locked) {
@@ -624,12 +562,7 @@ async function analyzeSession() {
   startProgress();
   const form = new FormData();
   form.append("allsky_token", state.allskyToken);
-  const allskyFile = $("allsky").files[0];
-  if (allskyFile) form.append("allsky", allskyFile);
-  const profile = selectedProfile();
-  if (!profile) { stopProgress(); return; }
-  form.append("profile_id", profile.profile_id);
-  form.append("profile_json", JSON.stringify(profile));
+  form.append("profile_id", $("equipmentProfile").value);
   const target = state.target;
   form.append("target_name", target.name || "선택 천체");
   form.append("target_object_type", target.object_type || "unknown");
@@ -705,9 +638,10 @@ function galleryCard(key, url) {
   const copy = document.createElement("div");
   copy.className = "card-copy";
   const h = document.createElement("h4"); h.textContent = title;
-  const p = document.createElement("p"); p.textContent = description;
-  const a = document.createElement("a"); a.href = url; a.download = ""; a.className = "secondary small"; a.textContent = "이미지 저장";
-  copy.append(h, p, a); article.append(img, copy); return article;
+  const a = document.createElement("a"); a.href = url; a.download = ""; a.className = "secondary compact"; a.textContent = "저장";
+  copy.append(h);
+  if (description) { const p = document.createElement("p"); p.textContent = description; copy.append(p); }
+  copy.append(a); article.append(img, copy); return article;
 }
 
 function populateGallery(containerId, keys, artifacts) {
@@ -741,7 +675,7 @@ function renderResult(result) {
   $("validityBadge").textContent = validityLabel(result.validity);
   $("resultTargetName").textContent = result.target?.name || "분석 결과";
   $("resultDetail").textContent = `${result.equipment_profile?.name || "장비 프로필"} · ${result.target?.object_type || "천체"} · 신호 모델 ${result.target_signal_model?.source || "없음"}`;
-  $("confidenceBox").textContent = `결과 신뢰도: ${confidenceLabel(result.confidence)} · ${validityLabel(result.validity)}`;
+  $("confidenceBox").textContent = `신뢰도 ${confidenceLabel(result.confidence)} · ${validityLabel(result.validity)}`;
   $("mSub").textContent = plan.recommended_sub_exposure_sec == null ? "확정 불가" : formatSeconds(plan.recommended_sub_exposure_sec);
   $("mSnr").textContent = formatNumber(plan.predicted_snr_per_sub, 2);
   $("mFrames").textContent = plan.frames == null ? "—" : `${formatNumber(plan.frames, 0)}장`;
@@ -783,10 +717,24 @@ function renderResult(result) {
 
 function openImageModal(url, caption) { $("modalImage").src = url; $("modalCaption").textContent = caption; $("modalDownload").href = url; $("imageModal").classList.remove("hidden"); }
 
+function closeProfileManager() {
+  $("profileManager").classList.add("hidden");
+  document.body.classList.remove("profile-open");
+}
+
 function wireEvents() {
-  document.querySelectorAll("[data-scroll]").forEach((button) => button.addEventListener("click", () => $(button.dataset.scroll).scrollIntoView({ behavior: "smooth" })));
-  $("openProfileManager").addEventListener("click", () => { $("profileManager").classList.remove("hidden"); $("profileManager").scrollIntoView({ behavior: "smooth" }); });
-  $("closeProfileManager").addEventListener("click", () => $("profileManager").classList.add("hidden"));
+  document.querySelectorAll("[data-scroll]").forEach((button) => button.addEventListener("click", () => {
+    document.querySelectorAll(".nav-item[data-scroll]").forEach((item) => item.classList.toggle("active", item === button));
+    const target = $(button.dataset.scroll);
+    if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+  }));
+  $("openProfileManager").addEventListener("click", () => {
+    $("profileManager").classList.remove("hidden");
+    document.body.classList.add("profile-open");
+  });
+  $("closeProfileManager").addEventListener("click", closeProfileManager);
+  $("profileManager").addEventListener("click", (event) => { if (event.target === $("profileManager")) closeProfileManager(); });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !$("profileManager").classList.contains("hidden")) closeProfileManager(); });
   $("profileScopeFile").addEventListener("change", () => inspectReferenceScope($("profileScopeFile").files[0]));
   $("profileAllskyFile").addEventListener("change", () => { $("profileAllskyName").textContent = $("profileAllskyFile").files[0]?.name || "선택하지 않음"; });
   $("allsky").addEventListener("change", () => inspectAllsky($("allsky").files[0]));
@@ -798,9 +746,6 @@ function wireEvents() {
   $("importTarget").addEventListener("click", () => importStellariumTarget(false));
   $("createProfile").addEventListener("click", createEquipmentProfile);
   $("deleteProfile").addEventListener("click", deleteSelectedProfile);
-  $("exportProfile").addEventListener("click", exportSelectedProfile);
-  $("importProfile").addEventListener("click", () => $("importProfileFile").click());
-  $("importProfileFile").addEventListener("change", () => importProfileFile($("importProfileFile").files[0]));
   $("equipmentProfile").addEventListener("change", () => { renderSelectedProfile(); updateReadyState(); });
   $("minimumSkyAltitude").addEventListener("input", updateTargetAltitudeStatus);
   $("analyzeButton").addEventListener("click", analyzeSession);
@@ -819,7 +764,6 @@ function wireEvents() {
 
 window.addEventListener("DOMContentLoaded", async () => {
   wireEvents();
-  await checkServer();
   await loadProfiles();
   updateReadyState();
 });

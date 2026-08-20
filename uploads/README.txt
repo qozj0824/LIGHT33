@@ -1,1 +1,1 @@
-Runtime uploads are temporary.
+Temporary uploads are stored here.
