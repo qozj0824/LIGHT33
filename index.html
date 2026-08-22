@@ -11,9 +11,7 @@
 </head>
 <body>
 <header class="topbar" aria-label="NØXIS">
-  <div class="brand" role="img" aria-label="NØXIS">
-    <span>N</span><span class="orbit-letter">Ø</span><span>XIS</span>
-  </div>
+  <div class="brand" role="img" aria-label="NØXIS">NØXIS</div>
 </header>
 
 <div class="app-frame">
@@ -83,13 +81,17 @@
           <div class="module-title"><span class="module-index">02</span><h2>관측 대상</h2></div>
         </div>
 
-        <div class="connection-panel">
-          <div class="connection-row">
-            <input id="stellariumUrl" value="http://127.0.0.1:8090" aria-label="Stellarium 주소">
-            <button type="button" id="stellariumPingDaily" class="ghost compact">연결 확인</button>
-          </div>
-          <button type="button" id="importTarget" class="primary full">선택 천체 가져오기</button>
+        <div class="connection-panel minimal-connection">
+          <button type="button" id="importTarget" class="primary full">Stellarium 대상 가져오기</button>
           <span id="stellariumStatus" class="status-text" aria-live="polite"></span>
+          <details class="inline-settings">
+            <summary>연결 설정</summary>
+            <div class="connection-settings-grid">
+              <label>주소<input id="stellariumUrl" value="http://127.0.0.1:8090" autocomplete="off"></label>
+              <label>암호 <span class="field-hint">선택</span><input id="stellariumPassword" type="password" autocomplete="current-password" placeholder="Remote Control 암호"></label>
+            </div>
+            <button type="button" id="stellariumPingDaily" class="ghost compact">연결 확인</button>
+          </details>
         </div>
 
         <div id="targetCard" class="target-card empty">선택 안 됨</div>
@@ -187,10 +189,22 @@
   <div class="profile-dialog">
     <div class="profile-titlebar">
       <div><span class="module-index">EQ</span><h2 id="profileManagerTitle">장비 프로필</h2></div>
-      <button type="button" id="closeProfileManager" class="icon-button" aria-label="닫기">×</button>
+      <button type="button" id="closeProfileManager" class="ghost compact" aria-label="닫기">닫기</button>
     </div>
 
     <div class="profile-scroll">
+      <section class="profile-block saved-profile-block">
+        <div class="block-title-row"><h3>현재 프로필</h3><span id="savedProfileName" class="optional-badge">선택 없음</span></div>
+        <div class="profile-preview-grid saved-preview-grid">
+          <article class="profile-image-preview">
+            <div class="profile-image-frame"><img id="savedScopePreview" alt="등록된 망원경 기준 영상"><span>망원경</span></div>
+          </article>
+          <article class="profile-image-preview">
+            <div class="profile-image-frame"><img id="savedAllskyPreview" alt="등록된 전천 기준 영상"><span>전천</span></div>
+          </article>
+        </div>
+      </section>
+
       <section class="profile-block">
         <h3>기준 영상</h3>
         <div class="grid two upload-grid">
@@ -207,49 +221,65 @@
             <span id="profileAllskyName" class="file-name">선택 안 함</span>
           </label>
         </div>
-        <div class="profile-capture-time">
-          <strong>촬영시각</strong>
-          <span id="profileScopeMetadata"></span>
-          <div class="profile-time-actions">
-            <button type="button" id="setStellariumReferenceTime" class="ghost compact" disabled>기준 시각 적용</button>
-            <button type="button" id="setStellariumNow" class="ghost compact">현재 시각</button>
+        <div class="profile-preview-grid">
+          <article class="profile-image-preview">
+            <div class="profile-image-frame"><img id="profileScopePreview" alt="망원경 기준 영상 미리보기"><span id="profileScopePreviewPlaceholder">망원경</span></div>
+            <div class="profile-preview-copy"><span id="profileScopePreviewStatus" class="status-text"></span><small id="profileScopeMetadata"></small></div>
+          </article>
+          <article class="profile-image-preview">
+            <div class="profile-image-frame"><img id="profileAllskyPreview" alt="전천 기준 영상 미리보기"><span id="profileAllskyPreviewPlaceholder">전천</span></div>
+            <div class="profile-preview-copy"><span id="profileAllskyPreviewStatus" class="status-text"></span><small id="profileAllskyMetadata"></small></div>
+          </article>
+        </div>
+        <details class="inline-settings capture-time-details">
+          <summary>촬영시각 / Stellarium 기준 설정</summary>
+          <div class="profile-capture-time">
+            <div class="profile-time-actions">
+              <button type="button" id="setStellariumReferenceTime" class="ghost compact" disabled>기준 촬영시각</button>
+              <button type="button" id="setStellariumNow" class="ghost compact">현재 시각</button>
+            </div>
+            <span id="profileTimeStatus" class="status-text"></span>
           </div>
-          <span id="profileTimeStatus" class="status-text"></span>
-        </div>
-      </section>
-
-      <section class="profile-block">
-        <div class="block-title-row"><h3>기준 천체</h3><span class="optional-badge">선택</span></div>
-        <div class="profile-actions-inline">
-          <button type="button" id="stellariumPing" class="ghost compact">연결 확인</button>
-          <button type="button" id="importReferenceTarget" class="secondary compact">기준 천체 가져오기</button>
-        </div>
-        <div id="referenceTargetCard" class="target-card empty">선택 안 됨</div>
+        </details>
       </section>
 
       <section class="profile-block">
         <h3>장비 정보</h3>
-        <div class="grid four profile-fields">
-          <label>프로필 이름<input id="newProfileName" placeholder="FSQ-85ED + 533MC + UV/IR"></label>
-          <label>망원경<input id="telescopeName" placeholder="FSQ-85ED"></label>
-          <label>카메라<input id="cameraName" placeholder="533MC"></label>
-          <label>필터<input id="filterName" placeholder="UV/IR Cut"></label>
+        <div class="grid three profile-fields profile-fields-basic">
+          <label>프로필 이름<input id="newProfileName" placeholder="내 촬영 장비"></label>
+          <label>망원경<input id="telescopeName" placeholder="망원경 이름"></label>
+          <label>카메라<input id="cameraName" placeholder="카메라 이름"></label>
+          <label>필터<input id="filterName" placeholder="필터"></label>
           <label>Gain / ISO<input id="captureGainSetting" placeholder="Gain 100 / ISO 800"></label>
           <label>Binning<input id="profileBinning" placeholder="1×1"></label>
-          <label>변환 Gain (e⁻/ADU)<input id="profileGain" type="number" value="1" min="0.000001" step="0.01"></label>
-          <label>읽기잡음 (e⁻)<input id="profileReadNoise" type="number" value="3" min="0" step="0.1"></label>
-          <label>암전류 (e⁻/pix/s)<input id="profileDarkCurrent" type="number" value="0" min="0" step="0.001"></label>
-          <label>Bias/offset ADU<input id="profileBiasOffset" type="number" placeholder="자동" step="0.1"></label>
-          <label>Clipping ADU<input id="profileSensorClip" type="number" placeholder="65535" min="0" step="1"></label>
-          <label>Pixel scale (arcsec/pix)<input id="profilePixelScale" type="number" placeholder="1.82" min="0.001" step="0.001"></label>
-          <label>망원경 노출 (초)<input id="profileScopeExposure" type="number" placeholder="헤더 우선" min="0.0001" step="0.1"></label>
-          <label>전천 노출 (초)<input id="profileAllskyExposure" type="number" placeholder="헤더 우선" min="0.0001" step="0.1"></label>
-          <label>기준 V등급<input id="profileReferenceMag" type="number" step="0.01" placeholder="자동"></label>
-          <label>기준 각크기 (°)<input id="profileReferenceSize" type="number" min="0" step="0.001" placeholder="자동"></label>
-          <label>대기소광 k<input id="profileExtinction" type="number" value="0.20" min="0" max="5" step="0.01"></label>
-          <label class="checkbox-field"><input id="profileNoiseConfirmed" type="checkbox"><span>센서 물성값 확인</span></label>
+          <label>망원경 노출 (초)<input id="profileScopeExposure" type="number" placeholder="헤더 자동" min="0.0001" step="0.1"></label>
+          <label>전천 노출 (초)<input id="profileAllskyExposure" type="number" placeholder="헤더 자동" min="0.0001" step="0.1"></label>
         </div>
+        <details class="advanced-settings equipment-advanced">
+          <summary>센서 / 계산 설정</summary>
+          <div class="grid four profile-fields">
+            <label>변환 Gain (e⁻/ADU)<input id="profileGain" type="number" value="1" min="0.000001" step="0.01"></label>
+            <label>읽기잡음 (e⁻)<input id="profileReadNoise" type="number" value="3" min="0" step="0.1"></label>
+            <label>암전류 (e⁻/pix/s)<input id="profileDarkCurrent" type="number" value="0" min="0" step="0.001"></label>
+            <label>Bias/offset ADU<input id="profileBiasOffset" type="number" placeholder="자동" step="0.1"></label>
+            <label>Clipping ADU<input id="profileSensorClip" type="number" placeholder="자동" min="0" step="1"></label>
+            <label>Pixel scale (arcsec/pix)<input id="profilePixelScale" type="number" placeholder="선택" min="0.001" step="0.001"></label>
+            <label>기준 V등급<input id="profileReferenceMag" type="number" step="0.01" placeholder="자동"></label>
+            <label>기준 각크기 (°)<input id="profileReferenceSize" type="number" min="0" step="0.001" placeholder="자동"></label>
+            <label>대기소광 k<input id="profileExtinction" type="number" value="0.20" min="0" max="5" step="0.01"></label>
+            <label class="checkbox-field"><input id="profileNoiseConfirmed" type="checkbox"><span>센서 물성값 확인</span></label>
+          </div>
+        </details>
       </section>
+
+      <details class="advanced-settings profile-reference-settings">
+        <summary>기준 천체 연동</summary>
+        <div class="profile-actions-inline">
+          <button type="button" id="stellariumPing" class="ghost compact">연결 확인</button>
+          <button type="button" id="importReferenceTarget" class="secondary compact">현재 천체 가져오기</button>
+        </div>
+        <div id="referenceTargetCard" class="target-card empty">선택 안 됨</div>
+      </details>
 
       <details class="advanced-settings profile-calibration">
         <summary>보정 프레임</summary>

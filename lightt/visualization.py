@@ -48,8 +48,17 @@ def _display_array(image: np.ndarray) -> np.ndarray:
 
 
 def save_scope_preview(image: np.ndarray, output: Path, max_dim: int = 1800) -> None:
-    reduced, _, _ = _reduce(image, max_dim)
-    Image.fromarray(_display_array(reduced), mode="L").save(output)
+    """Save a lightweight preview without allocating a full interpolation buffer.
+
+    Inspection runs on small Render instances too, so a strided reduction is preferred
+    here over scipy zoom. Scientific analysis continues to use the original array.
+    """
+    if image.ndim != 2:
+        raise ValueError("미리보기 입력은 2차원 영상이어야 합니다.")
+    height, width = image.shape
+    step = max(1, int(math.ceil(max(height / max_dim, width / max_dim))))
+    reduced = image[::step, ::step]
+    Image.fromarray(_display_array(reduced), mode="L").save(output, optimize=True)
 
 
 def save_scope_overlay(

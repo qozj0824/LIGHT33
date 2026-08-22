@@ -283,12 +283,26 @@ async def inspect_image(
         path = await _save_upload(file, job_dir, safe_role, budget)
         frame = await run_in_threadpool(load_image, path)
         _validate_pixels(frame.metadata.width, frame.metadata.height)
-        domain = await run_in_threadpool(infer_intensity_domain, frame, sensor_clip_adu, safety)
+        domain = None
+        inspect_warnings: list[str] = []
+        try:
+            domain = await run_in_threadpool(infer_intensity_domain, frame, sensor_clip_adu, safety)
+        except Exception as exc:
+            # Metadata/preview are still useful even when detector-domain inference is not.
+            inspect_warnings.append(f"ADU 범위 판정 생략: {type(exc).__name__}: {str(exc)[:180]}")
+
         preview_id = "preview_" + uuid.uuid4().hex[:12]
         preview_dir = RESULT_ROOT / preview_id
         preview_dir.mkdir(parents=True, exist_ok=False)
         preview_path = preview_dir / f"{safe_role}_preview.png"
-        await run_in_threadpool(save_scope_preview, frame.intensity, preview_path)
+        preview_url: str | None = None
+        preview_warning: str | None = None
+        try:
+            await run_in_threadpool(save_scope_preview, frame.intensity, preview_path)
+            preview_url = f"/results/{preview_id}/{preview_path.name}"
+        except Exception as exc:
+            preview_warning = f"서버 미리보기 생략: {type(exc).__name__}"
+            inspect_warnings.append(preview_warning)
         suggested_rois = None
         if safe_role == "scope":
             try:
@@ -313,8 +327,10 @@ async def inspect_image(
             {
                 "metadata": asdict(frame.metadata),
                 "capture_time_utc": image_observation_time_utc(frame.metadata.date_obs, frame.metadata.source_type),
-                "domain": asdict(domain),
-                "preview_url": f"/results/{preview_id}/{preview_path.name}",
+                "domain": asdict(domain) if domain is not None else None,
+                "preview_url": preview_url,
+                "preview_warning": preview_warning,
+                "warnings": inspect_warnings,
                 "upload_token": token,
                 "suggested_rois": suggested_rois,
             }
@@ -324,9 +340,10 @@ async def inspect_image(
         raise
     except Exception as exc:
         shutil.rmtree(job_dir, ignore_errors=True)
+        message = str(exc).strip().replace("\n", " ")[:240]
         raise HTTPException(
             status_code=400,
-            detail=f"미리보기를 만들 수 없습니다: {type(exc).__name__}",
+            detail=f"영상을 읽을 수 없습니다: {type(exc).__name__}{(': ' + message) if message else ''}",
         ) from exc
 
 
@@ -342,6 +359,25 @@ async def _resolve_main_file(
     if upload is None:
         raise HTTPException(status_code=400, detail=f"{role} 영상 파일이 필요합니다.")
     return await _save_upload(upload, job_dir, role, budget)
+
+
+def _profile_reference_source(profile_id: str, role: str) -> Path | None:
+    # Validate the id through the normal profile loader first.
+    load_profile(PROFILE_ROOT, profile_id)
+    directory = PROFILE_ROOT / profile_id
+    stem = "reference_scope" if role == "scope" else "reference_allsky"
+    candidates = sorted(path for path in directory.glob(stem + ".*") if path.is_file())
+    return candidates[0] if candidates else None
+
+
+def _profile_preview_url(profile_id: str, role: str) -> str | None:
+    try:
+        source = _profile_reference_source(profile_id, role)
+    except ValueError:
+        return None
+    if source is None:
+        return None
+    return f"/api/equipment/profiles/{profile_id}/preview/{role}"
 
 
 @app.get("/api/equipment/profiles")
@@ -363,6 +399,8 @@ def equipment_profiles() -> dict[str, object]:
                 "zero_point_quality": item.zero_point_quality,
                 "c_sys_quality": item.c_sys_quality,
                 "warnings": item.warnings,
+                "scope_preview_url": _profile_preview_url(item.profile_id, "scope"),
+                "allsky_preview_url": _profile_preview_url(item.profile_id, "allsky"),
             }
             for item in profiles
         ]
@@ -375,6 +413,28 @@ def equipment_profile_detail(profile_id: str) -> dict[str, object]:
         return load_profile(PROFILE_ROOT, profile_id).to_dict()
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/equipment/profiles/{profile_id}/preview/{role}")
+async def equipment_profile_preview(profile_id: str, role: str) -> FileResponse:
+    if role not in {"scope", "allsky"}:
+        raise HTTPException(status_code=404, detail="미리보기 종류가 올바르지 않습니다.")
+    try:
+        source = _profile_reference_source(profile_id, role)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if source is None:
+        raise HTTPException(status_code=404, detail="등록된 기준 영상이 없습니다.")
+    directory = PROFILE_ROOT / profile_id
+    preview_path = directory / f"preview_{role}.png"
+    try:
+        if (not preview_path.exists()) or preview_path.stat().st_mtime < source.stat().st_mtime:
+            frame = await run_in_threadpool(load_image, source)
+            _validate_pixels(frame.metadata.width, frame.metadata.height)
+            await run_in_threadpool(save_scope_preview, frame.intensity, preview_path)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"등록 영상 미리보기 실패: {type(exc).__name__}") from exc
+    return FileResponse(preview_path, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
 
 @app.delete("/api/equipment/profiles/{profile_id}")
