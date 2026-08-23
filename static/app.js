@@ -20,6 +20,7 @@ const state = {
   referenceAllskyInspectController: null,
   objectUrls: new Map(),
   stellariumAutoTimer: null,
+  analysisError: null,
 };
 
 const ARTIFACT_INFO = {
@@ -122,8 +123,14 @@ async function normalizeStellariumPayload(info, status) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ info, status }),
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.detail || "천체 정보 해석 실패");
+  const payload = await readJsonResponse(response);
+  if (!response.ok) {
+    const detail = payload.detail || `HTTP ${response.status}`;
+    if (String(detail).trim().startsWith("<!DOCTYPE") || String(detail).trim().startsWith("<html")) {
+      throw new Error("NØXIS 서버 응답 오류 · Render 로그 확인");
+    }
+    throw new Error(detail || "천체 정보 해석 실패");
+  }
   return payload;
 }
 
@@ -538,8 +545,8 @@ async function createEquipmentProfile() {
   $("profileCreateStatus").textContent = "프로필 분석 중";
   try {
     const response = await fetch("/api/equipment/profiles/create", { method: "POST", body: form });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "프로필 생성 실패");
+    const payload = await readJsonResponse(response);
+    if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
     const warningText = Array.isArray(payload.warnings) && payload.warnings.length ? ` · 확인 ${payload.warnings.length}` : "";
     $("profileCreateStatus").textContent = `생성 완료 · ${payload.confidence}${warningText}`;
     await loadProfiles(payload.profile_id);
@@ -592,7 +599,8 @@ async function deleteSelectedProfile() {
 async function loadProfiles(selectId = null) {
   try {
     const response = await fetch("/api/equipment/profiles", { cache: "no-store" });
-    const payload = await response.json();
+    const payload = await readJsonResponse(response);
+    if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
     state.profiles = payload.profiles || [];
     const select = $("equipmentProfile");
     select.innerHTML = "";
@@ -679,8 +687,9 @@ function updateReadyState() {
     $("readyStatus").textContent = "";
   } else {
     button.textContent = "분석";
-    $("readyStatus").textContent = "";
+    $("readyStatus").textContent = state.analysisError || "";
   }
+  if (state.analysisError && !state.analyzing) $("readyStatus").textContent = state.analysisError;
 }
 
 
@@ -695,6 +704,7 @@ function setSessionLocked(locked) {
 }
 
 function startProgress() {
+  state.analysisError = null;
   state.analyzing = true;
   setSessionLocked(true);
   $("progressBox").classList.remove("hidden");
@@ -760,9 +770,11 @@ async function analyzeSession() {
       ({ response, payload } = await submitAnalysis(false));
     }
     if (!response.ok) throw new Error(payload.detail || "분석 실패");
+    state.analysisError = null;
     renderResult(payload);
   } catch (error) {
-    $("readyStatus").textContent = `분석 실패 · ${error.message}`;
+    state.analysisError = `분석 실패 · ${error.message}`;
+    $("readyStatus").textContent = state.analysisError;
     $("analyzeButton").textContent = "다시 분석";
   } finally {
     stopProgress();

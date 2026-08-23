@@ -432,8 +432,8 @@ def _load_rendered(path: Path) -> ImageFrame:
         )
         return ImageFrame(
             intensity=arr,
-            raw_intensity=arr.copy(),
-            saturation_intensity=arr.copy(),
+            raw_intensity=arr,
+            saturation_intensity=arr,
             preview_rgb=np.asarray(preview),
             metadata=metadata,
         )

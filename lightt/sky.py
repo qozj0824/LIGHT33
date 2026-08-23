@@ -164,22 +164,43 @@ def build_sky_map(
     image, sx, sy = _decimate(frame.intensity)
     original_width = frame.intensity.shape[1] * frame.coordinate_scale_x
     original_height = frame.intensity.shape[0] * frame.coordinate_scale_y
+    calibration_scale_x = 1.0
+    calibration_scale_y = 1.0
     if fisheye.mode == "calibrated_kannala_brandt":
-        if fisheye.sensor_width is not None:
+        if fisheye.sensor_width is not None and fisheye.sensor_height is not None:
+            width_ratio = original_width / fisheye.sensor_width
+            height_ratio = original_height / fisheye.sensor_height
+            exact_width = abs(width_ratio - 1.0) <= 0.02
+            exact_height = abs(height_ratio - 1.0) <= 0.02
+            if not (exact_width and exact_height):
+                # A uniformly resized frame preserves the calibrated optical geometry.
+                # Map its pixels back to detector coordinates instead of rejecting it.
+                scale_x = fisheye.sensor_width / max(original_width, 1e-9)
+                scale_y = fisheye.sensor_height / max(original_height, 1e-9)
+                proportional = abs(scale_x / max(scale_y, 1e-9) - 1.0) <= 0.02
+                if not proportional:
+                    raise ValueError(
+                        "전천 영상 종횡비가 어안 보정 영상과 다릅니다. "
+                        f"입력 {original_width:.0f}×{original_height:.0f}, "
+                        f"보정 {fisheye.sensor_width}×{fisheye.sensor_height}."
+                    )
+                calibration_scale_x = scale_x
+                calibration_scale_y = scale_y
+        elif fisheye.sensor_width is not None:
             relative = abs(original_width - fisheye.sensor_width) / fisheye.sensor_width
             if relative > 0.02:
                 raise ValueError(
                     f"전천 영상 원본 폭({original_width:.0f})이 어안 보정 폭({fisheye.sensor_width})과 다릅니다."
                 )
-        if fisheye.sensor_height is not None:
+        elif fisheye.sensor_height is not None:
             relative = abs(original_height - fisheye.sensor_height) / fisheye.sensor_height
             if relative > 0.02:
                 raise ValueError(
                     f"전천 영상 원본 높이({original_height:.0f})가 어안 보정 높이({fisheye.sensor_height})과 다릅니다."
                 )
     yy, xx = np.indices(image.shape, dtype=np.float64)
-    total_scale_x = frame.coordinate_scale_x * sx
-    total_scale_y = frame.coordinate_scale_y * sy
+    total_scale_x = frame.coordinate_scale_x * sx * calibration_scale_x
+    total_scale_y = frame.coordinate_scale_y * sy * calibration_scale_y
     az, alt, valid = pixel_to_altaz(
         xx,
         yy,
@@ -198,7 +219,9 @@ def build_sky_map(
             fisheye,
             coordinate_scale_x=total_scale_x,
             coordinate_scale_y=total_scale_y,
-            area_multiplier=frame.photometric_area_multiplier,
+            area_multiplier=(
+                frame.photometric_area_multiplier * calibration_scale_x * calibration_scale_y
+            ),
         )
         solid_angle_map = np.where(
             np.isfinite(solid_angle_map) & (solid_angle_map > 0), solid_angle_map, np.nan
