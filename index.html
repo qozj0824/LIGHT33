@@ -11,7 +11,9 @@
 </head>
 <body>
 <header class="topbar" aria-label="NØXIS">
-  <div class="brand" role="img" aria-label="NØXIS">NØXIS</div>
+  <div class="brand" role="img" aria-label="NØXIS">
+    <span>N</span><span class="brand-planet" aria-hidden="true"><span class="brand-orb">O</span></span><span>XIS</span>
+  </div>
 </header>
 
 <div class="app-frame">
@@ -43,20 +45,23 @@
     <div class="workspace-grid">
       <section class="panel module module-allsky" id="allskyPanel">
         <div class="module-head">
-          <div class="module-title"><span class="module-index">01</span><h2>전천 영상</h2></div>
+          <div class="module-title"><h2>전천 영상</h2></div>
           <span id="allskyPreviewStatus" class="status-text"></span>
         </div>
 
-        <label class="dropzone">
+        <label class="allsky-viewer" for="allsky">
           <input id="allsky" type="file" accept=".fits,.fit,.fts,.cr2,.cr3,.nef,.arw,.dng,.raf,.orf,.rw2,.png,.jpg,.jpeg,.tif,.tiff">
-          <span class="dropzone-icon">＋</span>
-          <strong id="allskyName">전천 영상 선택</strong>
-          <small>RAW / FITS / 이미지</small>
+          <img id="allskyPreview" alt="전천 영상 미리보기">
+          <span id="allskyPreviewPlaceholder" class="viewer-placeholder">
+            <span class="viewer-plus">＋</span>
+            <strong>전천 영상 선택</strong>
+            <small>RAW · FITS · 이미지</small>
+          </span>
+          <span class="viewer-change">변경</span>
         </label>
-
-        <div class="preview-card">
-          <div class="preview-frame"><img id="allskyPreview" alt="전천 영상 미리보기"></div>
-          <div id="allskyMetadata" class="metadata-box"></div>
+        <div class="viewer-meta-row">
+          <strong id="allskyName">선택 안 됨</strong>
+          <span id="allskyMetadata" class="metadata-box"></span>
         </div>
 
         <details class="advanced-settings">
@@ -78,43 +83,43 @@
 
       <section class="panel module module-target" id="targetPanel">
         <div class="module-head">
-          <div class="module-title"><span class="module-index">02</span><h2>관측 대상</h2></div>
+          <div class="module-title"><h2>관측 대상</h2></div>
+          <div class="target-sync">
+            <span class="connection-dot" id="stellariumDot" aria-hidden="true"></span>
+            <span id="stellariumStatus" class="status-text" aria-live="polite">자동 연결</span>
+            <button type="button" id="importTarget" class="icon-button tiny" title="Stellarium 다시 동기화" aria-label="Stellarium 다시 동기화">↻</button>
+          </div>
         </div>
 
-        <div class="connection-panel minimal-connection">
-          <button type="button" id="importTarget" class="primary full">Stellarium 대상 가져오기</button>
-          <span id="stellariumStatus" class="status-text" aria-live="polite"></span>
-          <details class="inline-settings">
-            <summary>연결 설정</summary>
-            <div class="connection-settings-grid">
-              <label>주소<input id="stellariumUrl" value="http://127.0.0.1:8090" autocomplete="off"></label>
-              <label>암호 <span class="field-hint">선택</span><input id="stellariumPassword" type="password" autocomplete="current-password" placeholder="Remote Control 암호"></label>
-            </div>
-            <button type="button" id="stellariumPingDaily" class="ghost compact">연결 확인</button>
-          </details>
-        </div>
-
-        <div id="targetCard" class="target-card empty">선택 안 됨</div>
+        <div id="targetCard" class="target-card empty">Stellarium에서 천체를 선택하세요</div>
         <div id="targetAltitudeStatus" class="safety-notice neutral"><strong>고도</strong><span>대상 선택 필요</span></div>
+
+        <details class="inline-settings connection-details">
+          <summary>Stellarium 연결 설정</summary>
+          <div class="connection-settings-grid">
+            <label>주소<input id="stellariumUrl" value="http://127.0.0.1:8090" autocomplete="off"></label>
+            <label>암호 <span class="field-hint">선택</span><input id="stellariumPassword" type="password" autocomplete="current-password" placeholder="Remote Control 암호"></label>
+          </div>
+          <button type="button" id="stellariumPingDaily" class="ghost compact">연결 확인</button>
+        </details>
       </section>
 
       <section class="panel module module-planning" id="planningPanel">
         <div class="module-head">
-          <div class="module-title"><span class="module-index">03</span><h2>촬영 조건</h2></div>
+          <div class="module-title"><h2>촬영 조건</h2></div>
         </div>
 
         <div class="grid planning-grid">
           <label class="important-field">장비 프로필
             <select id="equipmentProfile"><option value="">불러오는 중</option></select>
           </label>
-          <fieldset class="snr-control">
-            <legend>목표 SNR</legend>
-            <div class="preset-row" data-target="targetSnr">
-              <button type="button" data-value="50">50</button>
-              <button type="button" class="active" data-value="100">100</button>
-              <button type="button" data-value="150">150</button>
+          <fieldset class="quality-control">
+            <legend>촬영 품질</legend>
+            <div class="preset-row quality-row" data-target="targetSnr">
+              <button type="button" data-value="50"><strong>빠름</strong><small>SNR 50</small></button>
+              <button type="button" class="active" data-value="100"><strong>표준</strong><small>SNR 100</small></button>
+              <button type="button" data-value="150"><strong>정밀</strong><small>SNR 150</small></button>
             </div>
-            <input id="targetSnr" type="number" value="100" min="0.1" max="10000" step="1">
           </fieldset>
         </div>
 
@@ -123,6 +128,7 @@
         <details class="advanced-settings">
           <summary>상세 촬영 조건</summary>
           <div class="grid compact-grid three">
+            <label>목표 SNR<input id="targetSnr" type="number" value="100" min="0.1" max="10000" step="1"></label>
             <label>최소 단일노출 (초)<input id="minExposure" type="number" value="1" min="0.001" step="0.1"></label>
             <label>최대 단일노출 (초)<input id="maxExposure" type="number" value="600" min="0.01" step="1"></label>
             <label>추적 한계 (초)<input id="trackingLimit" type="number" value="0" min="0" step="1"></label>
@@ -140,12 +146,9 @@
     </div>
 
     <section class="command-bar" id="analyzeArea">
-      <div class="command-status">
-        <span class="command-label">분석</span>
-        <strong id="readyStatus">입력 확인</strong>
-      </div>
-      <div id="progressBox" class="progress-box hidden"><div class="spinner"></div><div><strong id="progressTitle">분석 중</strong><span id="progressText">전천 영상 처리</span></div></div>
-      <button type="button" id="analyzeButton" class="primary large" disabled>분석 실행</button>
+      <span id="readyStatus" class="command-message" aria-live="polite">전천 영상을 선택하세요</span>
+      <div id="progressBox" class="progress-box hidden"><div class="spinner"></div><span id="progressTitle">분석 중</span><span id="progressText" class="hidden">전천 영상 처리</span></div>
+      <button type="button" id="analyzeButton" class="primary large analyze-main" disabled>전천 영상을 선택하세요</button>
     </section>
 
     <section id="resultSection" class="result-section hidden">
@@ -158,14 +161,20 @@
         <div id="confidenceBox" class="confidence-box"></div>
       </div>
 
-      <div class="metric-grid">
+      <div class="metric-grid metric-grid-primary">
         <article><span>권장 단일노출</span><strong id="mSub">—</strong></article>
-        <article><span>예상 1장 SNR</span><strong id="mSnr">—</strong></article>
         <article><span>필요 장수</span><strong id="mFrames">—</strong></article>
         <article><span>총 적분시간</span><strong id="mTotal">—</strong></article>
-        <article><span>대상 고도</span><strong id="mAltitude">—</strong></article>
-        <article><span>하늘 배경</span><strong id="mBackground">—</strong></article>
+        <article><span>예상 1장 SNR</span><strong id="mSnr">—</strong></article>
       </div>
+
+      <details class="result-context-details">
+        <summary>관측 조건</summary>
+        <div class="metric-grid metric-grid-secondary">
+          <article><span>대상 고도</span><strong id="mAltitude">—</strong></article>
+          <article><span>하늘 배경</span><strong id="mBackground">—</strong></article>
+        </div>
+      </details>
 
       <div class="result-notes-grid">
         <section><h3>계산 상태</h3><div id="validityReasons"></div></section>
@@ -188,7 +197,7 @@
 <div class="profile-layer hidden" id="profileManager" role="dialog" aria-modal="true" aria-labelledby="profileManagerTitle">
   <div class="profile-dialog">
     <div class="profile-titlebar">
-      <div><span class="module-index">EQ</span><h2 id="profileManagerTitle">장비 프로필</h2></div>
+      <div><h2 id="profileManagerTitle">장비 프로필</h2></div>
       <button type="button" id="closeProfileManager" class="ghost compact" aria-label="닫기">닫기</button>
     </div>
 
@@ -207,28 +216,24 @@
 
       <section class="profile-block">
         <h3>기준 영상</h3>
-        <div class="grid two upload-grid">
-          <label class="file-card">
-            <span class="file-number">T</span>
-            <strong>망원경 기준 영상</strong>
-            <input id="profileScopeFile" type="file" accept=".fits,.fit,.fts,.cr2,.cr3,.nef,.arw,.dng,.raf,.orf,.rw2,.png,.jpg,.jpeg,.tif,.tiff">
-            <span id="profileScopeName" class="file-name">파일 선택</span>
-          </label>
-          <label class="file-card">
-            <span class="file-number">A</span>
-            <strong>기준 전천 영상 <em>선택</em></strong>
-            <input id="profileAllskyFile" type="file" accept=".fits,.fit,.fts,.cr2,.cr3,.nef,.arw,.dng,.raf,.orf,.rw2,.png,.jpg,.jpeg,.tif,.tiff">
-            <span id="profileAllskyName" class="file-name">선택 안 함</span>
-          </label>
-        </div>
-        <div class="profile-preview-grid">
-          <article class="profile-image-preview">
-            <div class="profile-image-frame"><img id="profileScopePreview" alt="망원경 기준 영상 미리보기"><span id="profileScopePreviewPlaceholder">망원경</span></div>
-            <div class="profile-preview-copy"><span id="profileScopePreviewStatus" class="status-text"></span><small id="profileScopeMetadata"></small></div>
+        <div class="profile-preview-grid profile-upload-grid">
+          <article class="profile-image-preview upload-preview-card">
+            <label class="profile-image-frame upload-preview-frame" for="profileScopeFile">
+              <input id="profileScopeFile" type="file" accept=".fits,.fit,.fts,.cr2,.cr3,.nef,.arw,.dng,.raf,.orf,.rw2,.png,.jpg,.jpeg,.tif,.tiff">
+              <img id="profileScopePreview" alt="망원경 기준 영상 미리보기">
+              <span id="profileScopePreviewPlaceholder" class="upload-placeholder"><strong>망원경 기준 영상</strong><small>선택</small></span>
+              <span class="viewer-change">변경</span>
+            </label>
+            <div class="profile-preview-copy"><strong id="profileScopeName" class="file-name">선택 안 됨</strong><span id="profileScopePreviewStatus" class="status-text"></span><small id="profileScopeMetadata"></small></div>
           </article>
-          <article class="profile-image-preview">
-            <div class="profile-image-frame"><img id="profileAllskyPreview" alt="전천 기준 영상 미리보기"><span id="profileAllskyPreviewPlaceholder">전천</span></div>
-            <div class="profile-preview-copy"><span id="profileAllskyPreviewStatus" class="status-text"></span><small id="profileAllskyMetadata"></small></div>
+          <article class="profile-image-preview upload-preview-card">
+            <label class="profile-image-frame upload-preview-frame" for="profileAllskyFile">
+              <input id="profileAllskyFile" type="file" accept=".fits,.fit,.fts,.cr2,.cr3,.nef,.arw,.dng,.raf,.orf,.rw2,.png,.jpg,.jpeg,.tif,.tiff">
+              <img id="profileAllskyPreview" alt="전천 기준 영상 미리보기">
+              <span id="profileAllskyPreviewPlaceholder" class="upload-placeholder"><strong>전천 기준 영상</strong><small>선택 사항</small></span>
+              <span class="viewer-change">변경</span>
+            </label>
+            <div class="profile-preview-copy"><strong id="profileAllskyName" class="file-name">선택 안 됨</strong><span id="profileAllskyPreviewStatus" class="status-text"></span><small id="profileAllskyMetadata"></small></div>
           </article>
         </div>
         <details class="inline-settings capture-time-details">

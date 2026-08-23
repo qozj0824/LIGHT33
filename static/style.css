@@ -717,3 +717,335 @@ pre { max-height: 580px; overflow: auto; margin: 0; padding: 11px; background: #
 }
 .status-text.ok { color: var(--good); }
 .status-text.error { color: var(--danger); }
+
+/* --------------------------------------------------------------------------
+   NØXIS v35.2 — compact N.I.N.A-style UI refinement
+   -------------------------------------------------------------------------- */
+:root {
+  --topbar-h: 52px;
+  --sidebar-w: 76px;
+}
+
+/* Wordmark: clean text with the pastel Saturn ring only inside the Ø position. */
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .17em;
+  margin: 0;
+  font-size: 1.46rem;
+  letter-spacing: .19em;
+  font-weight: 800;
+}
+.brand > span:last-child { margin-right: -.19em; }
+.brand-planet {
+  position: relative;
+  width: 1.06em;
+  height: 1.06em;
+  display: inline-grid;
+  place-items: center;
+  margin: 0 .02em;
+}
+.brand-orb {
+  position: relative;
+  z-index: 2;
+  display: block;
+  line-height: 1;
+  letter-spacing: 0;
+  color: #f7f6fb;
+}
+.brand-planet::after {
+  content: "";
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  top: 50%;
+  width: 1.36em;
+  height: .53em;
+  transform: translate(-50%, -50%) rotate(-25deg);
+  border: 2px solid transparent;
+  border-radius: 50%;
+  background: linear-gradient(100deg, #ffb8ac 5%, #c5a9ff 48%, #8aa6ff 95%) border-box;
+  -webkit-mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  filter: saturate(.9);
+}
+
+/* Denser desktop-tool proportions. */
+.workspace { padding: 10px 12px 16px; }
+.workspace-grid { gap: 8px; }
+.panel,
+.result-section,
+.command-bar {
+  box-shadow: none;
+}
+.panel {
+  border-radius: 5px;
+  padding: 13px;
+}
+.module-head {
+  min-height: 31px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+}
+.module-title h2 { font-size: .94rem; }
+.sidebar { padding: 7px 6px 9px; }
+.nav-item {
+  min-height: 58px;
+  border-radius: 5px;
+}
+.nav-item svg { width: 21px; height: 21px; }
+
+/* Preview-first all-sky workflow. */
+.allsky-viewer {
+  position: relative;
+  min-height: 430px;
+  aspect-ratio: 16 / 10;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid #26324a;
+  border-radius: 4px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(48, 61, 93, .20), transparent 36%),
+    #070b13;
+  cursor: pointer;
+}
+.allsky-viewer:hover { border-color: #50618c; }
+.allsky-viewer > input,
+.upload-preview-frame > input {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.allsky-viewer > img {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: none;
+  background: #050910;
+}
+.allsky-viewer > img[src] { display: block; }
+.viewer-placeholder {
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  color: var(--muted);
+  text-align: center;
+}
+.viewer-placeholder.hidden { display: none; }
+.viewer-placeholder strong { color: #dce2f7; font-size: .88rem; }
+.viewer-placeholder small { color: var(--muted-2); font-size: .7rem; }
+.viewer-plus {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #34425f;
+  border-radius: 50%;
+  color: #9caaff;
+  font-size: 1.1rem;
+}
+.viewer-change {
+  position: absolute;
+  z-index: 6;
+  right: 8px;
+  top: 8px;
+  padding: 4px 7px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 4px;
+  background: rgba(6, 10, 18, .72);
+  color: #d6dcef;
+  font-size: .67rem;
+  font-weight: 700;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+.allsky-viewer:not(:has(img[src])) .viewer-change,
+.upload-preview-frame:not(:has(img[src])) .viewer-change { display: none; }
+.viewer-meta-row {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 2px 0;
+  min-width: 0;
+}
+.viewer-meta-row > strong {
+  max-width: 44%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #dfe4f5;
+  font-size: .74rem;
+}
+.viewer-meta-row .metadata-box {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  flex: 1;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Stellarium: status + one manual refresh; normal operation is automatic. */
+.target-sync {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+.connection-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #65718c;
+  box-shadow: 0 0 0 3px rgba(101, 113, 140, .08);
+}
+.connection-dot.pending { background: var(--warning); }
+.connection-dot.ok { background: var(--good); box-shadow: 0 0 0 3px rgba(84, 215, 155, .09); }
+.connection-dot.error { background: var(--danger); box-shadow: 0 0 0 3px rgba(255, 125, 148, .08); }
+.icon-button.tiny {
+  width: 27px;
+  height: 27px;
+  min-height: 27px;
+  border-radius: 4px;
+  font-size: .93rem;
+}
+.connection-details { margin-top: 9px; }
+.target-card {
+  margin-top: 0;
+  border-radius: 4px;
+}
+.safety-notice { border-radius: 4px; }
+
+/* Keep only the useful quality choice in the normal planning view. */
+.quality-control { padding: 8px 9px 9px; border-radius: 5px; }
+.quality-row { margin-bottom: 0; }
+.quality-row button {
+  min-height: 43px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 1px;
+  border-radius: 4px;
+}
+.quality-row button strong { color: inherit; font-size: .74rem; }
+.quality-row button small { color: var(--muted-2); font-size: .61rem; }
+.quality-row button.active small { color: #aeb8ff; }
+.important-field,
+.profile-summary,
+fieldset,
+details,
+.inline-settings { border-radius: 5px; }
+
+/* One primary action. Error/state copy appears only when it matters. */
+.command-bar {
+  bottom: 8px;
+  margin-top: 8px;
+  min-height: 58px;
+  border-radius: 5px;
+  grid-template-columns: minmax(0, 1fr) auto minmax(260px, 34%);
+  padding: 8px 9px;
+}
+.command-message {
+  color: var(--danger);
+  font-size: .73rem;
+  min-width: 0;
+}
+.command-message:empty { display: none; }
+.analyze-main {
+  width: 100%;
+  border-radius: 5px;
+}
+.progress-box { justify-self: end; }
+
+/* Results: four decisions first, context second. */
+.metric-grid-primary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.metric-grid-secondary {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+.result-context-details { margin: 8px 0; }
+.result-context-details > .metric-grid { margin: 8px; }
+.result-section { border-radius: 5px; }
+.metric-grid article,
+.result-notes-grid section,
+.gallery article,
+.table-card { border-radius: 4px; }
+
+/* Equipment setup: the image itself is the upload control. */
+.profile-dialog,
+.profile-block,
+.profile-image-preview { border-radius: 5px; }
+.profile-upload-grid { margin-top: 0; }
+.upload-preview-card { overflow: hidden; }
+.upload-preview-frame {
+  cursor: pointer;
+  min-height: 210px;
+  aspect-ratio: 16 / 9;
+}
+.upload-preview-frame:hover { outline: 1px solid #5b6da4; outline-offset: -1px; }
+.upload-placeholder {
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  color: var(--muted-2);
+  letter-spacing: 0;
+}
+.upload-placeholder strong { color: #dce2f7; font-size: .8rem; }
+.upload-placeholder small { color: #71809f; font-size: .67rem; }
+.upload-placeholder.hidden { display: none; }
+.profile-preview-copy {
+  min-height: 40px;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 4px 8px;
+}
+.profile-preview-copy .file-name {
+  max-width: 240px;
+  color: #dce2f7;
+}
+.profile-preview-copy small {
+  grid-column: 1 / -1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.saved-preview-grid .profile-image-frame {
+  min-height: 150px;
+  aspect-ratio: 16 / 8.5;
+}
+
+@media (max-width: 1180px) {
+  .allsky-viewer { min-height: 360px; }
+  .metric-grid-primary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  :root { --topbar-h: 54px; }
+  .brand { font-size: 1.34rem; }
+  .allsky-viewer { min-height: 250px; }
+  .viewer-meta-row { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .viewer-meta-row > strong { max-width: 100%; }
+  .viewer-meta-row .metadata-box { width: 100%; text-align: left; }
+  .command-bar { grid-template-columns: 1fr; }
+  .progress-box { justify-self: start; }
+  .metric-grid-primary,
+  .metric-grid-secondary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .upload-preview-frame { min-height: 180px; }
+}
