@@ -74,6 +74,14 @@ class FisheyeConfig:
     a0: float | None = None
     eps: float | None = None
     coefficients: list[float] = field(default_factory=list)
+    # Generic calibrated camera model used for externally sourced all-sky cameras
+    # such as ESO APICAM.  The rotation maps local ENU sky vectors into camera
+    # coordinates.  radial_theta_coefficients are k1, k2 ... in
+    # r = f*theta*(1 + k1*theta^2 + k2*theta^4 + ...).
+    focal_length_px: float | None = None
+    rotation_vector: list[float] = field(default_factory=list)
+    radial_theta_coefficients: list[float] = field(default_factory=list)
+    mirror_x: bool = False
     fit_star_count: int = 0
     fit_rms_deg: float | None = None
     fit_edge_rms_deg: float | None = None

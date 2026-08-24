@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from .coordinates import resolve_target_altaz
-from .geometry import load_fisheye_config, validate_fisheye_calibration
+from .geometry import select_fisheye_config, validate_fisheye_calibration
 from .io import apply_calibration, infer_intensity_domain, load_image, resolve_exposure
 from .models import AnalysisResult, AnalysisSettings, CalibrationSet
 from .photometry import (
@@ -237,7 +237,13 @@ def run_analysis(
     )
     warnings.extend(plan.warnings)
 
-    fisheye = load_fisheye_config(project_root / "config" / "fisheye.json")
+    fisheye = select_fisheye_config(
+        project_root,
+        camera_name=allsky_original.metadata.camera,
+        filename=allsky_original.metadata.filename,
+        width=allsky_original.metadata.width,
+        height=allsky_original.metadata.height,
+    )
     fisheye_errors = validate_fisheye_calibration(fisheye)
     sky = build_sky_map(
         allsky_frame,

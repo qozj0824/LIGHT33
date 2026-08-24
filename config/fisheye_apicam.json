@@ -1,0 +1,19 @@
+{
+  "mode": "calibrated_camera_model",
+  "center_x": 1989.92026,
+  "center_y": 2050.87758,
+  "sensor_width": 4096,
+  "sensor_height": 4096,
+  "focal_length_px": 1337.07097,
+  "rotation_vector": [-0.0292604630, 0.0984226934, -3.09486171],
+  "radial_theta_coefficients": [-0.0405882265, 0.00135696633],
+  "mirror_x": true,
+  "fit_star_count": 36,
+  "fit_rms_deg": null,
+  "fit_edge_rms_deg": null,
+  "validation_star_count": 0,
+  "validation_max_error_px": null,
+  "validation_basis": "NØXIS v35.6 same-frame bright-star fit on ESO APICAM APICAM.2018-06-14T04:00:23.000; median nearest-star residual ~0.94 px and fit-set RMS ~1.01 px for 36 matched bright-star positions. This is not an independent hold-out validation, so direction/Csys quality remains planning until external validation is completed.",
+  "calibration_date": "2026-08-24",
+  "camera_lens_id": "ESO APICAM-3 KAF-16803 + Canon 12mm 180-degree fisheye"
+}

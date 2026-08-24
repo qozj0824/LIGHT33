@@ -11,7 +11,7 @@ import numpy as np
 
 from . import __version__
 from .equipment import EquipmentProfile, airmass_from_altitude
-from .geometry import load_fisheye_config, validate_fisheye_directional_calibration
+from .geometry import select_fisheye_config, validate_fisheye_directional_calibration
 from .io import apply_calibration, load_image
 from .models import AnalysisSettings, CalibrationSet, ImageMetadata
 from .planning import _safe_round_down
@@ -557,7 +557,13 @@ def run_session_analysis(
         az_bins=az_bins,
         alt_bins=alt_bins,
     )
-    fisheye = load_fisheye_config(project_root / "config" / "fisheye.json")
+    fisheye = select_fisheye_config(
+        project_root,
+        camera_name=allsky_original.metadata.camera,
+        filename=allsky_original.metadata.filename,
+        width=allsky_original.metadata.width,
+        height=allsky_original.metadata.height,
+    )
     fisheye_errors = validate_fisheye_directional_calibration(fisheye)
     sky = build_sky_map(
         allsky_frame,

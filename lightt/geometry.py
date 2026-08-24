@@ -26,6 +26,10 @@ def load_fisheye_config(path: Path) -> FisheyeConfig:
         a0=_optional_float(data.get("a0")),
         eps=_optional_float(data.get("eps")),
         coefficients=[float(v) for v in data.get("coefficients", [])],
+        focal_length_px=_optional_float(data.get("focal_length_px")),
+        rotation_vector=[float(v) for v in data.get("rotation_vector", [])],
+        radial_theta_coefficients=[float(v) for v in data.get("radial_theta_coefficients", [])],
+        mirror_x=bool(data.get("mirror_x", False)),
         fit_star_count=int(data.get("fit_star_count", 0) or 0),
         fit_rms_deg=_optional_float(data.get("fit_rms_deg")),
         fit_edge_rms_deg=_optional_float(data.get("fit_edge_rms_deg")),
@@ -54,6 +58,73 @@ def _optional_float(value: object) -> float | None:
 
 
 
+def select_fisheye_config(
+    project_root: Path,
+    *,
+    camera_name: str | None = None,
+    filename: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> FisheyeConfig:
+    """Choose the directional calibration that belongs to the actual all-sky camera.
+
+    v35.5 had one global Canon/Sigma calibration, which meant a square APICAM
+    frame was either rejected for aspect ratio or, worse, could be interpreted
+    with the wrong optical model.  APICAM is selected only by instrument/file
+    identity; a generic 4096x4096 image is *not* assumed to be APICAM.
+    """
+    identity = " ".join([str(camera_name or ""), str(filename or "")]).upper()
+    if "APICAM" in identity:
+        candidate = project_root / "config" / "fisheye_apicam.json"
+        if candidate.exists():
+            config = load_fisheye_config(candidate)
+            if width is not None and height is not None:
+                # Keep the identity decision separate from the size check.  The
+                # normal sky-map geometry validator gives a precise error later.
+                _ = (width, height)
+            return config
+    return load_fisheye_config(project_root / "config" / "fisheye.json")
+
+
+def _rotation_matrix_from_rotvec(rotation_vector: list[float]) -> np.ndarray:
+    if len(rotation_vector) != 3:
+        raise ValueError("보정 카메라 회전벡터는 3개 값이어야 합니다.")
+    vector = np.asarray(rotation_vector, dtype=np.float64)
+    angle = float(np.linalg.norm(vector))
+    if not math.isfinite(angle):
+        raise ValueError("보정 카메라 회전벡터가 유한값이 아닙니다.")
+    if angle <= 1e-14:
+        return np.eye(3, dtype=np.float64)
+    axis = vector / angle
+    x, y, z = axis
+    skew = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=np.float64)
+    return np.eye(3) + math.sin(angle) * skew + (1.0 - math.cos(angle)) * (skew @ skew)
+
+
+def _theta_from_radial_radius(
+    radius: np.ndarray,
+    focal_length_px: float,
+    coefficients: list[float],
+) -> np.ndarray:
+    """Invert r=f*theta*(1+k1 theta^2+k2 theta^4+...) by Newton iteration."""
+    r = np.asarray(radius, dtype=np.float64)
+    f = max(float(focal_length_px), 1e-12)
+    theta = np.clip(r / f, 0.0, math.radians(110.0))
+    for _ in range(10):
+        poly = np.ones_like(theta)
+        derivative_poly = np.ones_like(theta)
+        for index, coefficient in enumerate(coefficients, start=1):
+            power = 2 * index
+            c = float(coefficient)
+            poly += c * np.power(theta, power)
+            derivative_poly += (power + 1) * c * np.power(theta, power)
+        value = f * theta * poly - r
+        derivative = f * derivative_poly
+        step = np.divide(value, derivative, out=np.zeros_like(value), where=np.abs(derivative) > 1e-12)
+        theta = np.clip(theta - step, 0.0, math.radians(110.0))
+    return theta
+
+
 def validate_fisheye_calibration(config: FisheyeConfig) -> list[str]:
     """Return reasons why a fisheye model should not be treated as quantitative."""
     errors: list[str] = []
@@ -76,30 +147,39 @@ def validate_fisheye_calibration(config: FisheyeConfig) -> list[str]:
 
 
 def validate_fisheye_directional_calibration(config: FisheyeConfig) -> list[str]:
-    """Validate the fisheye solution for azimuth/altitude direction lookup.
-
-    The research report records a 30-star fit and independent grid-point checks
-    within 5 detector pixels.  That evidence is appropriate for selecting a
-    directional sky-background cell.  It is deliberately kept separate from
-    ``validate_fisheye_calibration`` because a pixel residual alone does not
-    establish an angular RMS or the accuracy of per-pixel solid angle.
-    """
+    """Validate a fisheye solution for azimuth/altitude direction lookup."""
     errors: list[str] = []
-    if config.mode != "calibrated_kannala_brandt":
-        errors.append("보고서의 기준별 보정 Kannala–Brandt 모델이 아닙니다.")
+    if config.mode == "calibrated_kannala_brandt":
+        if any(value is None for value in (config.center_x, config.center_y, config.E, config.a0, config.eps)):
+            errors.append("어안 중심·자세 파라미터가 완전하지 않습니다.")
+        if not config.coefficients:
+            errors.append("어안 왜곡계수가 없습니다.")
+        stars = max(config.fit_star_count, config.validation_star_count)
+        if stars < 20:
+            errors.append("방향 보정에 사용한 기준별 수가 20개 미만이거나 기록되지 않았습니다.")
+        if config.validation_max_error_px is None or config.validation_max_error_px > 5.0:
+            errors.append("방향 보정의 독립 검증 최대오차가 없거나 5 px보다 큽니다.")
+    elif config.mode == "calibrated_camera_model":
+        if any(value is None for value in (config.center_x, config.center_y, config.focal_length_px)):
+            errors.append("APICAM 보정의 중심·초점 파라미터가 완전하지 않습니다.")
+        if len(config.rotation_vector) != 3:
+            errors.append("APICAM 보정 회전벡터가 완전하지 않습니다.")
+        if config.fit_star_count < 15:
+            errors.append("APICAM 보정에 사용한 기준별 수가 15개 미만이거나 기록되지 않았습니다.")
+        # The supplied APICAM solution is a same-frame bright-star fit.  It is
+        # intentionally allowed for planning/background lookup but is not
+        # promoted to independently validated quantitative direction accuracy.
+        if config.validation_star_count < 10 or config.validation_max_error_px is None:
+            errors.append("APICAM 좌표해는 독립 hold-out 검증 전이므로 방향값을 계획용으로 취급합니다.")
+        elif config.validation_max_error_px > 5.0:
+            errors.append("APICAM 방향 보정의 독립 검증 최대오차가 5 px보다 큽니다.")
+    else:
+        errors.append("표준별로 보정된 어안 방향 모델이 아닙니다.")
         return errors
-    if any(value is None for value in (config.center_x, config.center_y, config.E, config.a0, config.eps)):
-        errors.append("어안 중심·자세 파라미터가 완전하지 않습니다.")
-    if not config.coefficients:
-        errors.append("어안 왜곡계수가 없습니다.")
-    stars = max(config.fit_star_count, config.validation_star_count)
-    if stars < 20:
-        errors.append("방향 보정에 사용한 기준별 수가 20개 미만이거나 기록되지 않았습니다.")
-    if config.validation_max_error_px is None or config.validation_max_error_px > 5.0:
-        errors.append("방향 보정의 독립 검증 최대오차가 없거나 5 px보다 큽니다.")
     if not config.camera_lens_id:
         errors.append("보정에 사용한 카메라·렌즈 식별자가 기록되지 않았습니다.")
     return errors
+
 
 def odd_polynomial_theta(radius_pixels: np.ndarray, coefficients: list[float]) -> np.ndarray:
     radius = np.asarray(radius_pixels, dtype=np.float64)
@@ -175,6 +255,50 @@ def pixel_to_altaz(
             & (u0 <= np.deg2rad(100.0))
         )
         return np.rad2deg(az), np.rad2deg(alt), valid
+
+    if config.mode == "calibrated_camera_model":
+        if config.center_x is None or config.center_y is None or config.focal_length_px is None:
+            raise ValueError("보정 카메라 모델의 중심·초점 파라미터가 완전하지 않습니다.")
+        if len(config.rotation_vector) != 3:
+            raise ValueError("보정 카메라 모델의 회전벡터가 완전하지 않습니다.")
+        original_x = (x + 0.5) * coordinate_scale_x - 0.5
+        original_y = (y + 0.5) * coordinate_scale_y - 0.5
+        dx = original_x - float(config.center_x)
+        dy = original_y - float(config.center_y)
+        radius = np.hypot(dx, dy)
+        theta = _theta_from_radial_radius(
+            radius,
+            float(config.focal_length_px),
+            config.radial_theta_coefficients,
+        )
+        radial_x = np.divide(dx, radius, out=np.zeros_like(dx), where=radius > 1e-12)
+        radial_y = np.divide(dy, radius, out=np.zeros_like(dy), where=radius > 1e-12)
+        if config.mirror_x:
+            radial_x = -radial_x
+        sin_theta = np.sin(theta)
+        camera_vectors = np.stack(
+            [radial_x * sin_theta, radial_y * sin_theta, np.cos(theta)],
+            axis=-1,
+        )
+        rotation = _rotation_matrix_from_rotvec(config.rotation_vector)
+        # Forward calibration is camera = R @ local_ENU, so invert with R.T.
+        local_vectors = camera_vectors @ rotation
+        east = local_vectors[..., 0]
+        north = local_vectors[..., 1]
+        up = local_vectors[..., 2]
+        norm = np.sqrt(east * east + north * north + up * up)
+        up_normalized = np.divide(up, norm, out=np.zeros_like(up), where=norm > 1e-12)
+        alt = np.rad2deg(np.arcsin(np.clip(up_normalized, -1.0, 1.0)))
+        az = np.mod(np.rad2deg(np.arctan2(east, north)), 360.0)
+        valid = (
+            np.isfinite(alt)
+            & np.isfinite(az)
+            & np.isfinite(theta)
+            & (theta <= math.radians(100.0))
+            & (alt >= -5.0)
+            & (alt <= 90.5)
+        )
+        return az, alt, valid
 
     center_x, center_y, horizon_radius = auto_geometry(shape)
     if config.center_x is not None:

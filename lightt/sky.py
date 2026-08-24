@@ -166,7 +166,7 @@ def build_sky_map(
     original_height = frame.intensity.shape[0] * frame.coordinate_scale_y
     calibration_scale_x = 1.0
     calibration_scale_y = 1.0
-    if fisheye.mode == "calibrated_kannala_brandt":
+    if fisheye.mode in {"calibrated_kannala_brandt", "calibrated_camera_model"}:
         if fisheye.sensor_width is not None and fisheye.sensor_height is not None:
             width_ratio = original_width / fisheye.sensor_width
             height_ratio = original_height / fisheye.sensor_height

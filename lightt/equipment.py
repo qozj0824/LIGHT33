@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from .geometry import load_fisheye_config, validate_fisheye_directional_calibration
+from .geometry import select_fisheye_config, validate_fisheye_directional_calibration
 from .io import apply_calibration, infer_intensity_domain, load_image, resolve_exposure
 from .models import AnalysisSettings, CalibrationSet
 from .photometry import analyze_saturation, measure_extended_source, measure_point_source, measure_stars
@@ -575,7 +575,13 @@ def create_equipment_profile(
                     allsky_exposure_sec=float(allsky_exposure),
                     minimum_sky_altitude_deg=15.0,
                 )
-                fisheye = load_fisheye_config(project_root / "config" / "fisheye.json")
+                fisheye = select_fisheye_config(
+                    project_root,
+                    camera_name=allsky_original.metadata.camera,
+                    filename=allsky_original.metadata.filename,
+                    width=allsky_original.metadata.width,
+                    height=allsky_original.metadata.height,
+                )
                 fisheye_errors = validate_fisheye_directional_calibration(fisheye)
                 map_dir = directory / "reference_allsky_analysis"
                 map_dir.mkdir(exist_ok=True)
