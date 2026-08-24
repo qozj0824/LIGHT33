@@ -962,6 +962,7 @@ function renderResult(result) {
   $("mFrames").textContent = plan.frames == null ? "—" : `${formatNumber(plan.frames, 0)}장`;
   $("mTotal").textContent = formatSeconds(plan.total_integration_sec);
   $("mAltitude").textContent = `${formatNumber(result.target?.alt_deg, 2)}°`;
+  $("mAirmass").textContent = result.target?.airmass == null ? "—" : formatNumber(result.target.airmass, 5);
   $("mBackground").textContent = `${formatNumber(result.background_model?.telescope_background_e_per_sec_per_pixel, 3)} e⁻/s/pix`;
   renderList($("validityReasons"), result.validity_reasons || []);
   renderList($("warningList"), result.warnings || []);

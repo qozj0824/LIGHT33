@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from . import __version__
 from .equipment import EquipmentProfile, airmass_from_altitude
 from .geometry import load_fisheye_config, validate_fisheye_directional_calibration
 from .io import apply_calibration, load_image
@@ -583,6 +584,12 @@ def run_session_analysis(
     )
     warnings.extend(bg_warnings)
 
+    # Airmass is a geometric observing-condition value and does not depend on
+    # photometric zero-point availability. Store it explicitly for UI/JSON
+    # validation even when the absolute target signal model is unavailable.
+    current_airmass = airmass_from_altitude(target.get("alt_deg"))
+    target["airmass"] = current_airmass
+
     signal_rate, signal_per_pixel, signal_source, signal_warnings, signal_diag = _signal_model(
         profile,
         target,
@@ -705,7 +712,7 @@ def run_session_analysis(
     }
     result = {
         "job_id": job_id,
-        "version": "34.2.0",
+        "version": __version__,
         "validity": validity,
         "validity_reasons": validity_reasons,
         "target": target,

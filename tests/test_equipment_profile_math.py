@@ -330,3 +330,9 @@ def test_reference_epoch_mismatch_no_longer_blocks_basic_profile(monkeypatch):
     assert prepared["az_deg"] is None
     assert capture is not None
     assert any("프로필은 저장" in item for item in warnings)
+
+
+def test_airmass_deneb_validation_value():
+    # Validation sample from the NØXIS UI: altitude 41.37032161363435 deg.
+    value = airmass_from_altitude(41.37032161363435)
+    assert math.isclose(value, 1.51095, abs_tol=5e-5)

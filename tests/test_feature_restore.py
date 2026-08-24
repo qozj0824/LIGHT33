@@ -98,3 +98,11 @@ def test_stellarium_normalize_endpoint() -> None:
     assert payload["name"] == "M 42"
     assert payload["target_mode"] == "extended"
     assert payload["alt_deg"] == 45.0
+
+
+def test_airmass_metric_present_in_ui():
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "index.html").read_text(encoding="utf-8")
+    js = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    assert 'id="mAirmass"' in html
+    assert 'result.target?.airmass' in js
