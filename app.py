@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import gc
+import json
 import math
 import os
 import re
@@ -21,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from lightt import __version__
 from lightt.io import SUPPORTED_EXTENSIONS, infer_intensity_domain, load_image
 from lightt.models import AnalysisSettings, CalibrationSet
-from lightt.equipment import create_equipment_profile, delete_profile, list_profiles, load_profile
+from lightt.equipment import EquipmentProfile, create_equipment_profile, delete_profile, list_profiles, load_profile
 from lightt.session import run_session_analysis
 from lightt.photometry import propose_extended_rois
 from lightt.pipeline import run_analysis
@@ -47,6 +50,43 @@ MAX_IMAGE_PIXELS = int(os.environ.get("LIGHTT_MAX_IMAGE_PIXELS", str(120_000_000
 ANALYSIS_CONCURRENCY = max(1, int(os.environ.get("LIGHTT_ANALYSIS_CONCURRENCY", "1")))
 ANALYSIS_SEMAPHORE = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
 TOKEN_PATTERN = re.compile(r"^[a-f0-9]{24}$")
+SERVER_INSTANCE_ID = uuid.uuid4().hex[:12]
+SERVER_STARTED_AT = time.time()
+
+
+def _release_memory() -> None:
+    """Return large temporary NumPy/Matplotlib allocations to the OS when possible."""
+    gc.collect()
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        trim = getattr(libc, "malloc_trim", None)
+        if trim is not None:
+            trim(0)
+    except Exception:
+        pass
+
+
+def _load_profile_or_snapshot(profile_id: str, profile_snapshot_json: str | None) -> tuple[EquipmentProfile, bool]:
+    """Load a server profile, falling back to a browser-cached snapshot after a Render restart."""
+    try:
+        return load_profile(PROFILE_ROOT, profile_id), False
+    except ValueError as original:
+        if not profile_snapshot_json:
+            raise original
+        if len(profile_snapshot_json) > 500_000:
+            raise ValueError("브라우저 장비 프로필 백업이 너무 큽니다.") from original
+        try:
+            raw = json.loads(profile_snapshot_json)
+            if not isinstance(raw, dict):
+                raise ValueError("프로필 백업 형식이 올바르지 않습니다.")
+            profile = EquipmentProfile.from_dict(raw)
+        except Exception as exc:
+            raise ValueError("브라우저 장비 프로필 백업을 읽을 수 없습니다.") from exc
+        if profile.profile_id != profile_id:
+            raise ValueError("브라우저 장비 프로필 백업 ID가 현재 선택과 다릅니다.")
+        if not profile.name:
+            raise ValueError("브라우저 장비 프로필 백업이 불완전합니다.")
+        return profile, True
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -84,6 +124,9 @@ def health() -> dict[str, object]:
         "ok": True,
         "version": __version__,
         "analysis_concurrency": ANALYSIS_CONCURRENCY,
+        "instance_id": SERVER_INSTANCE_ID,
+        "uptime_sec": round(time.time() - SERVER_STARTED_AT, 1),
+        "pid": os.getpid(),
     }
 
 
@@ -111,7 +154,7 @@ def stellarium_normalize(
             detail="선택 천체 정보를 읽지 못했습니다. Stellarium에서 천체를 선택하세요.",
         )
     result = normalize_selected_object(info, status)
-    result.update({"ok": True, "warnings": []})
+    result.update({"ok": True, "warnings": [], "server_instance_id": SERVER_INSTANCE_ID})
     return result
 
 
@@ -323,18 +366,21 @@ async def inspect_image(
                 }
             except Exception:
                 suggested_rois = None
-        return JSONResponse(
-            {
-                "metadata": asdict(frame.metadata),
-                "capture_time_utc": image_observation_time_utc(frame.metadata.date_obs, frame.metadata.source_type),
-                "domain": asdict(domain) if domain is not None else None,
-                "preview_url": preview_url,
-                "preview_warning": preview_warning,
-                "warnings": inspect_warnings,
-                "upload_token": token,
-                "suggested_rois": suggested_rois,
-            }
-        )
+        response_payload = {
+            "metadata": asdict(frame.metadata),
+            "capture_time_utc": image_observation_time_utc(frame.metadata.date_obs, frame.metadata.source_type),
+            "domain": asdict(domain) if domain is not None else None,
+            "preview_url": preview_url,
+            "preview_warning": preview_warning,
+            "warnings": inspect_warnings,
+            "upload_token": token,
+            "suggested_rois": suggested_rois,
+        }
+        # Drop the full-resolution detector array before returning to keep the small
+        # Render instance from accumulating image memory between inspections.
+        del frame
+        _release_memory()
+        return JSONResponse(response_payload)
     except HTTPException:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise
@@ -345,6 +391,8 @@ async def inspect_image(
             status_code=400,
             detail=f"영상을 읽을 수 없습니다: {type(exc).__name__}{(': ' + message) if message else ''}",
         ) from exc
+    finally:
+        _release_memory()
 
 
 async def _resolve_main_file(
@@ -582,6 +630,7 @@ async def equipment_profile_create(
         raise HTTPException(status_code=500, detail=f"장비 프로필 생성 중 오류가 발생했습니다: {type(exc).__name__}") from exc
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
+        _release_memory()
 
 
 @app.post("/api/session/analyze")
@@ -592,6 +641,7 @@ async def session_analyze(
     allsky_dark: Annotated[list[UploadFile] | None, File()] = None,
     allsky_flat: Annotated[list[UploadFile] | None, File()] = None,
     profile_id: Annotated[str, Form()] = "",
+    profile_snapshot_json: Annotated[str | None, Form()] = None,
     target_name: Annotated[str, Form()] = "",
     target_object_type: Annotated[str, Form()] = "unknown",
     target_mode: Annotated[str, Form()] = "extended",
@@ -627,7 +677,7 @@ async def session_analyze(
     if not profile_id:
         raise HTTPException(status_code=422, detail="장비 프로필을 선택하세요.")
     try:
-        profile = load_profile(PROFILE_ROOT, profile_id)
+        profile, profile_recovered = _load_profile_or_snapshot(profile_id, profile_snapshot_json)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if target_mode not in {"point", "extended"}:
@@ -713,6 +763,10 @@ async def session_analyze(
                 manual_target_mag=manual_target_mag,
                 manual_surface_brightness_mag_arcsec2=manual_surface_brightness_mag_arcsec2,
             )
+        if profile_recovered:
+            result.setdefault("runtime", {})["profile_recovered_from_browser"] = True
+            result.setdefault("warnings", []).append("Render 서버 재시작 후 브라우저에 저장된 장비 프로필을 자동 복구했습니다.")
+        result.setdefault("runtime", {})["server_instance_id"] = SERVER_INSTANCE_ID
         return JSONResponse(result)
     except HTTPException:
         raise
@@ -722,6 +776,7 @@ async def session_analyze(
         raise HTTPException(status_code=500, detail=f"관측 계획 분석 중 오류가 발생했습니다: {type(exc).__name__}") from exc
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
+        _release_memory()
 
 
 
@@ -910,6 +965,7 @@ async def analyze(
         ) from exc
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
+        _release_memory()
 
 
 if __name__ == "__main__":

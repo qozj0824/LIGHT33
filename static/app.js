@@ -20,6 +20,9 @@ const state = {
   referenceAllskyInspectController: null,
   objectUrls: new Map(),
   stellariumAutoTimer: null,
+  stellariumSyncInFlight: false,
+  stellariumFresh: false,
+  serverInstanceId: null,
   analysisError: null,
 };
 
@@ -54,6 +57,57 @@ function formatSeconds(value) {
 }
 
 function escapeText(value) { return String(value ?? ""); }
+
+const PROFILE_SNAPSHOT_KEY = "noxis.profileSnapshots.v1";
+
+function loadProfileSnapshots() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PROFILE_SNAPSHOT_KEY) || "{}");
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch { return {}; }
+}
+
+function saveProfileSnapshot(profile) {
+  if (!profile?.profile_id) return;
+  try {
+    const snapshots = loadProfileSnapshots();
+    snapshots[profile.profile_id] = profile;
+    localStorage.setItem(PROFILE_SNAPSHOT_KEY, JSON.stringify(snapshots));
+  } catch { /* localStorage may be unavailable; server profile still works. */ }
+}
+
+function removeProfileSnapshot(profileId) {
+  try {
+    const snapshots = loadProfileSnapshots();
+    delete snapshots[profileId];
+    localStorage.setItem(PROFILE_SNAPSHOT_KEY, JSON.stringify(snapshots));
+  } catch { }
+}
+
+function getProfileSnapshot(profileId) {
+  return loadProfileSnapshots()[profileId] || null;
+}
+
+async function cacheServerProfileSnapshots(profiles) {
+  await Promise.all((profiles || []).map(async (profile) => {
+    if (!profile?.profile_id) return;
+    try {
+      const response = await fetch(`/api/equipment/profiles/${encodeURIComponent(profile.profile_id)}`, { cache: "no-store" });
+      const payload = await readJsonResponse(response);
+      if (response.ok && payload?.profile_id) saveProfileSnapshot(payload);
+    } catch { }
+  }));
+}
+
+function noteServerInstance(instanceId) {
+  if (!instanceId) return;
+  if (state.serverInstanceId && state.serverInstanceId !== instanceId) {
+    // Render restarted: preview tokens are ephemeral, but the selected browser file and
+    // cached equipment profile remain usable and are sent again automatically.
+    state.allskyToken = null;
+  }
+  state.serverInstanceId = instanceId;
+}
 
 function normalizeStellariumUrl(rawValue) {
   let raw = String(rawValue || "").trim();
@@ -105,6 +159,7 @@ async function stellariumRequest(endpoint, options = {}) {
 
 function stellariumFailureMessage(error) {
   const message = String(error?.message || "");
+  if (error?.source === "noxis") return "NØXIS 서버 재연결 중";
   if (/401|403/.test(message)) return "Remote Control 암호 확인";
   if (/permission|denied|address space|local network/i.test(message)) return "브라우저의 로컬 네트워크 권한 허용 필요";
   if (/Failed to fetch|NetworkError|Load failed|fetch/i.test(message)) return "Stellarium Remote Control/CORS 확인";
@@ -118,19 +173,26 @@ function setStellariumIndicator(stateName) {
 }
 
 async function normalizeStellariumPayload(info, status) {
-  const response = await fetch("/api/stellarium/normalize", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ info, status }),
-  });
+  let response;
+  try {
+    response = await fetch("/api/stellarium/normalize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ info, status }),
+    });
+  } catch (cause) {
+    const error = new Error("NØXIS 서버에 연결할 수 없습니다.");
+    error.source = "noxis";
+    error.cause = cause;
+    throw error;
+  }
   const payload = await readJsonResponse(response);
   if (!response.ok) {
-    const detail = payload.detail || `HTTP ${response.status}`;
-    if (String(detail).trim().startsWith("<!DOCTYPE") || String(detail).trim().startsWith("<html")) {
-      throw new Error("NØXIS 서버 응답 오류 · Render 로그 확인");
-    }
-    throw new Error(detail || "천체 정보 해석 실패");
+    const error = new Error(payload.detail || `HTTP ${response.status}`);
+    if (response.status >= 500 || payload.non_json) error.source = "noxis";
+    throw error;
   }
+  noteServerInstance(payload.server_instance_id);
   return payload;
 }
 
@@ -185,7 +247,13 @@ function showServerPreview(url, imageId, placeholderId = null) {
 async function readJsonResponse(response) {
   const text = await response.text();
   if (!text) return {};
-  try { return JSON.parse(text); } catch { return { detail: text.slice(0, 300) }; }
+  try { return JSON.parse(text); } catch {
+    const trimmed = text.trim();
+    if (/^<!doctype|^<html/i.test(trimmed)) {
+      return { detail: `NØXIS 서버가 임시 오류 페이지를 반환했습니다 (HTTP ${response.status}). 잠시 후 자동 재연결합니다.`, non_json: true };
+    }
+    return { detail: text.slice(0, 300), non_json: true };
+  }
 }
 
 async function inspectAllsky(file) {
@@ -435,9 +503,11 @@ async function stellariumPing({ quiet = false } = {}) {
     setStellariumIndicator("ok");
     return true;
   } catch (error) {
-    status.textContent = quiet ? "연결 필요" : stellariumFailureMessage(error);
+    state.stellariumFresh = false;
+    status.textContent = quiet ? "재연결 중" : stellariumFailureMessage(error);
     status.className = "status-text error";
     setStellariumIndicator("error");
+    updateReadyState();
     return false;
   }
 }
@@ -458,6 +528,7 @@ async function importStellariumTarget(reference = false, { quiet = false } = {})
       ra_deg: payload.ra_deg, dec_deg: payload.dec_deg, alt_deg: payload.alt_deg, az_deg: payload.az_deg,
       location: payload.location || null, time: payload.time || null,
     };
+    state.stellariumFresh = true;
     if (reference) {
       state.referenceTarget = target;
       renderTargetCard(target, true);
@@ -472,10 +543,13 @@ async function importStellariumTarget(reference = false, { quiet = false } = {})
     updateReadyState();
     return target;
   } catch (error) {
-    statusText.textContent = stellariumFailureMessage(error);
+    if (!reference) state.stellariumFresh = false;
+    const baseMessage = stellariumFailureMessage(error);
+    statusText.textContent = (!reference && state.target) ? `${baseMessage} · 마지막 천체 유지` : baseMessage;
     statusText.className = "status-text error";
     setStellariumIndicator("error");
-    if (!reference) { state.target = null; renderTargetCard(null, false); updateTargetAltitudeStatus(); }
+    // Do not erase the last valid target on a temporary localhost/Render interruption.
+    // Analysis stays disabled until a fresh sync succeeds.
     updateReadyState();
     return null;
   }
@@ -549,6 +623,7 @@ async function createEquipmentProfile() {
     if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
     const warningText = Array.isArray(payload.warnings) && payload.warnings.length ? ` · 확인 ${payload.warnings.length}` : "";
     $("profileCreateStatus").textContent = `생성 완료 · ${payload.confidence}${warningText}`;
+    saveProfileSnapshot(payload);
     await loadProfiles(payload.profile_id);
   } catch (error) {
     $("profileCreateStatus").textContent = `프로필 생성 실패: ${error.message}`;
@@ -584,8 +659,9 @@ async function deleteSelectedProfile() {
   $("deleteProfile").textContent = "삭제 중";
   try {
     const response = await fetch(`/api/equipment/profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+    const payload = await readJsonResponse(response);
+    if (!response.ok && response.status !== 404) throw new Error(payload.detail || `HTTP ${response.status}`);
+    removeProfileSnapshot(id);
     $("profileCreateStatus").textContent = `${profile?.name || "장비 프로필"} 삭제 완료`;
     await loadProfiles();
   } catch (error) {
@@ -601,7 +677,14 @@ async function loadProfiles(selectId = null) {
     const response = await fetch("/api/equipment/profiles", { cache: "no-store" });
     const payload = await readJsonResponse(response);
     if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
-    state.profiles = payload.profiles || [];
+    const serverProfiles = payload.profiles || [];
+    await cacheServerProfileSnapshots(serverProfiles);
+    const snapshots = loadProfileSnapshots();
+    const serverIds = new Set(serverProfiles.map((item) => item.profile_id));
+    const recoveredProfiles = Object.values(snapshots)
+      .filter((item) => item?.profile_id && !serverIds.has(item.profile_id))
+      .map((item) => ({ ...item, browser_recovery: true, scope_preview_url: null, allsky_preview_url: null }));
+    state.profiles = [...serverProfiles, ...recoveredProfiles];
     const select = $("equipmentProfile");
     select.innerHTML = "";
     if (!state.profiles.length) {
@@ -624,8 +707,24 @@ async function loadProfiles(selectId = null) {
     }
     renderSelectedProfile();
   } catch {
+    const snapshots = Object.values(loadProfileSnapshots()).filter((item) => item?.profile_id);
+    state.profiles = snapshots.map((item) => ({ ...item, browser_recovery: true, scope_preview_url: null, allsky_preview_url: null }));
     const select = $("equipmentProfile");
-    select.innerHTML = '<option value="">프로필 불러오기 실패</option>';
+    select.innerHTML = "";
+    if (state.profiles.length) {
+      state.profiles.forEach((profile) => {
+        const option = document.createElement("option");
+        option.value = profile.profile_id;
+        option.textContent = profile.name;
+        select.appendChild(option);
+      });
+      const remembered = localStorage.getItem("noxis.profileId");
+      if (remembered && state.profiles.some((item) => item.profile_id === remembered)) select.value = remembered;
+      else select.value = state.profiles[0].profile_id;
+      renderSelectedProfile();
+    } else {
+      select.innerHTML = '<option value="">프로필 불러오기 실패</option>';
+    }
   }
   updateReadyState();
 }
@@ -666,7 +765,8 @@ function updateReadyState() {
   const hasProfile = Boolean($("equipmentProfile").value);
   const targetKnown = Boolean(state.target && Number.isFinite(Number(state.target.alt_deg)));
   const targetGood = targetKnown && Number(state.target.alt_deg) >= Number($("minimumSkyAltitude").value || 15);
-  const ready = Boolean(hasAllsky && hasProfile && targetGood && !state.analyzing);
+  const targetFresh = Boolean(state.stellariumFresh);
+  const ready = Boolean(hasAllsky && hasProfile && targetGood && targetFresh && !state.analyzing);
   const button = $("analyzeButton");
   button.disabled = !ready;
 
@@ -685,6 +785,9 @@ function updateReadyState() {
   } else if (!targetGood) {
     button.textContent = "대상 고도를 확인하세요";
     $("readyStatus").textContent = "";
+  } else if (!targetFresh) {
+    button.textContent = "Stellarium 재연결 중";
+    $("readyStatus").textContent = "마지막 천체는 유지 중입니다.";
   } else {
     button.textContent = "분석";
     $("readyStatus").textContent = state.analysisError || "";
@@ -724,7 +827,10 @@ function buildAnalysisForm({ useToken = true } = {}) {
   const file = $("allsky").files[0];
   if (useToken && state.allskyToken) form.append("allsky_token", state.allskyToken);
   else if (file) form.append("allsky", file);
-  form.append("profile_id", $("equipmentProfile").value);
+  const selectedProfileId = $("equipmentProfile").value;
+  form.append("profile_id", selectedProfileId);
+  const profileSnapshot = getProfileSnapshot(selectedProfileId);
+  if (profileSnapshot) form.append("profile_snapshot_json", JSON.stringify(profileSnapshot));
   const target = state.target;
   form.append("target_name", target.name || "선택 천체");
   form.append("target_object_type", target.object_type || "unknown");
@@ -769,7 +875,11 @@ async function analyzeSession() {
       state.allskyToken = null;
       ({ response, payload } = await submitAnalysis(false));
     }
-    if (!response.ok) throw new Error(payload.detail || "분석 실패");
+    if (!response.ok) {
+      if (response.status === 404) throw new Error("서버가 재시작되어 장비 프로필을 찾지 못했습니다. 장비 프로필을 한 번 다시 저장하면 이후에는 자동 복구됩니다.");
+      if (response.status === 410) throw new Error("서버가 재시작되어 전천 영상 임시파일이 만료되었습니다. 같은 파일을 다시 선택하세요.");
+      throw new Error(payload.detail || "분석 실패");
+    }
     state.analysisError = null;
     renderResult(payload);
   } catch (error) {
@@ -894,8 +1004,13 @@ function closeProfileManager() {
 }
 
 async function syncStellariumTarget() {
-  if (state.analyzing || document.visibilityState !== "visible") return;
-  await importStellariumTarget(false, { quiet: true });
+  if (state.analyzing || state.stellariumSyncInFlight || document.visibilityState !== "visible") return;
+  state.stellariumSyncInFlight = true;
+  try {
+    await importStellariumTarget(false, { quiet: true });
+  } finally {
+    state.stellariumSyncInFlight = false;
+  }
 }
 
 async function initializeStellariumAutoSync() {

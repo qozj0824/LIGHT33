@@ -575,7 +575,13 @@ def build_sky_map(
     ax.set_ylabel(plot_text("고도 (°)", "Altitude (deg)"))
     ax.set_title(plot_text("전천 셀 신뢰도 · 차폐/결측/낮음/주의/좋음", "All-sky cell reliability · blocked/missing/low/caution/good"))
     colorbar = fig.colorbar(image_rel, ax=ax, ticks=[-1, 0, 1, 2, 3])
-    colorbar.ax.set_yticklabels(["차폐", "결측", "낮음", "주의", "좋음"])
+    colorbar.ax.set_yticklabels([
+        plot_text("차폐", "blocked"),
+        plot_text("결측", "missing"),
+        plot_text("낮음", "low"),
+        plot_text("주의", "caution"),
+        plot_text("좋음", "good"),
+    ])
     fig.savefig(reliability_path, dpi=160)
     plt.close(fig)
 
@@ -602,6 +608,14 @@ def build_sky_map(
     ax.axvline(sky_median, linestyle="--", label=plot_text(f"전천 중앙값 {sky_median:.2f}", f"All-sky median {sky_median:.2f}"))
     if target_background is not None:
         ax.axvline(target_background, linestyle=":", label=plot_text(f"목표 방향 {target_background:.2f}", f"Target direction {target_background:.2f}"))
+    # ADU values should be shown literally.  Matplotlib's default +2.2e3 offset
+    # made a 2200 ADU test image look like it was centered at 0.
+    try:
+        formatter = ax.xaxis.get_major_formatter()
+        formatter.set_useOffset(False)
+        formatter.set_scientific(False)
+    except Exception:
+        pass
     ax.set_xlabel(plot_text("셀별 하늘 배경 ADU", "Sky background ADU per cell"))
     ax.set_ylabel(plot_text("셀 수", "Cell count"))
     ax.set_title(plot_text("사용 가능한 하늘 배경 셀 분포", "Distribution of usable sky cells"))

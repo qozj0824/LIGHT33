@@ -54,3 +54,33 @@ def test_stellarium_set_time_endpoint(monkeypatch) -> None:
     )
     assert response.status_code == 200
     assert response.json()["paused"] is True
+
+
+def test_profile_snapshot_recovers_after_server_storage_loss(tmp_path: Path, monkeypatch) -> None:
+    import json
+    from lightt.equipment import EquipmentProfile
+
+    monkeypatch.setattr(app_module, "PROFILE_ROOT", tmp_path / "profiles")
+    profile = EquipmentProfile(
+        profile_id="a1b2c3d4",
+        name="Browser recovery profile",
+        created_at="2026-08-24T00:00:00+00:00",
+        telescope_name="Synthetic Scope",
+        camera_name="Synthetic Camera",
+        gain_e_per_adu=1.0,
+        read_noise_e=4.0,
+    )
+    loaded, recovered = app_module._load_profile_or_snapshot(
+        profile.profile_id,
+        json.dumps(profile.to_dict()),
+    )
+    assert recovered is True
+    assert loaded.profile_id == profile.profile_id
+    assert loaded.camera_name == "Synthetic Camera"
+
+
+def test_health_exposes_instance_id() -> None:
+    client = TestClient(app_module.app)
+    payload = client.get("/health").json()
+    assert isinstance(payload.get("instance_id"), str)
+    assert payload["instance_id"]

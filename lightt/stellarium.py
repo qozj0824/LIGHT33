@@ -78,7 +78,7 @@ def fetch_json(base_url: str, endpoint: str, timeout: float = 3.0) -> Any:
         url,
         headers={
             "Accept": "application/json,text/plain;q=0.8,*/*;q=0.2",
-            "User-Agent": "NOXIS-v35.1",
+            "User-Agent": "NOXIS-v35.4",
         },
         method="GET",
     )
@@ -106,7 +106,7 @@ def post_form(base_url: str, endpoint: str, fields: dict[str, object], timeout: 
         headers={
             "Accept": "text/plain,application/json;q=0.8,*/*;q=0.2",
             "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "NOXIS-v35.1",
+            "User-Agent": "NOXIS-v35.4",
         },
         method="POST",
     )
