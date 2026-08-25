@@ -12,7 +12,11 @@ from typing import Any
 
 import numpy as np
 
-from .geometry import select_fisheye_config, validate_fisheye_directional_calibration
+from .geometry import (
+    estimate_apicam_masked_pedestal,
+    select_fisheye_config,
+    validate_fisheye_directional_calibration,
+)
 from .io import apply_calibration, infer_intensity_domain, load_image, resolve_exposure
 from .models import AnalysisSettings, CalibrationSet
 from .photometry import analyze_saturation, measure_extended_source, measure_point_source, measure_stars
@@ -565,7 +569,33 @@ def create_equipment_profile(
                     light_exposure_sec=allsky_exposure,
                 )
                 ref_allsky_flat_applied = bool(allsky_cal_report.get("flat_frames"))
+                fisheye = select_fisheye_config(
+                    project_root,
+                    camera_name=allsky_original.metadata.camera,
+                    filename=allsky_original.metadata.filename,
+                    width=allsky_original.metadata.width,
+                    height=allsky_original.metadata.height,
+                )
                 allsky_offset, allsky_offset_known = _effective_detector_offset(allsky_original, allsky_cal_report)
+                allsky_offset_method = "calibration_or_header" if allsky_offset_known else "unknown"
+                allsky_offset_diagnostics: dict[str, Any] = {}
+                if not allsky_offset_known and not bool(allsky_cal_report.get("flat_frames")):
+                    estimated_offset, offset_diag = estimate_apicam_masked_pedestal(
+                        allsky_original.intensity,
+                        fisheye,
+                        camera_name=allsky_original.metadata.camera,
+                        filename=allsky_original.metadata.filename,
+                    )
+                    allsky_offset_diagnostics = offset_diag
+                    if estimated_offset is not None:
+                        allsky_offset = float(estimated_offset)
+                        allsky_offset_known = True
+                        allsky_offset_method = "apicam_masked_outer_field"
+                        warnings.append(
+                            f"APICAM 전천영상의 180° 영상원 밖 비조명 영역에서 동일 프레임의 "
+                            f"bias+dark pedestal를 {allsky_offset:.1f} ADU로 추정했습니다. "
+                            "별도 Bias가 없을 때 사용하는 프레임별 보정입니다."
+                        )
                 if not allsky_offset_known:
                     warnings.append(
                         "기준 전천 영상의 Bias/black offset을 확인하지 못했습니다. Csys는 계획용으로만 취급합니다."
@@ -578,13 +608,6 @@ def create_equipment_profile(
                     target_az_deg=float(target["az_deg"]),
                     allsky_exposure_sec=float(allsky_exposure),
                     minimum_sky_altitude_deg=15.0,
-                )
-                fisheye = select_fisheye_config(
-                    project_root,
-                    camera_name=allsky_original.metadata.camera,
-                    filename=allsky_original.metadata.filename,
-                    width=allsky_original.metadata.width,
-                    height=allsky_original.metadata.height,
                 )
                 fisheye_errors = validate_fisheye_directional_calibration(fisheye)
                 map_dir = directory / "reference_allsky_analysis"
@@ -633,6 +656,8 @@ def create_equipment_profile(
                     "allsky_exposure_sec": allsky_exposure,
                     "allsky_offset_adu": allsky_offset if 'allsky_offset' in locals() else None,
                     "allsky_offset_known": allsky_offset_known if 'allsky_offset_known' in locals() else False,
+                    "allsky_offset_method": allsky_offset_method if 'allsky_offset_method' in locals() else "unknown",
+                    "allsky_offset_diagnostics": allsky_offset_diagnostics if 'allsky_offset_diagnostics' in locals() else {},
                     "paired_frame_time_difference_min": paired_epoch_delta_min,
                 }
 

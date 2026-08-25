@@ -1,5 +1,6 @@
 # NØXIS
 
+> **v35.9 APICAM pedestal:** If an ESO APICAM FITS has no explicit Bias/offset calibration, NØXIS can estimate the same-frame bias+dark pedestal from the optically dark detector area outside the calibrated 180° image circle. The method is APICAM-specific, provenance is saved in JSON, and directional Csys quality remains planning until independent fisheye hold-out validation.
 > **v35.8 Render memory fix:** 4k-class all-sky FITS frames (including ESO APICAM/ALPACA) are now reduced to an 600-pixel analysis grid before coordinate transforms and star masking. The final 72×18 sky grid remains strongly oversampled, while peak RAM during equipment-profile creation is substantially lower.
 
  v35.1

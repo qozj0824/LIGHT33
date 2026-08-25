@@ -12,7 +12,11 @@ import numpy as np
 
 from . import __version__
 from .equipment import EquipmentProfile, airmass_from_altitude
-from .geometry import select_fisheye_config, validate_fisheye_directional_calibration
+from .geometry import (
+    estimate_apicam_masked_pedestal,
+    select_fisheye_config,
+    validate_fisheye_directional_calibration,
+)
 from .io import apply_calibration, load_image
 from .models import AnalysisSettings, CalibrationSet, ImageMetadata
 from .planning import _safe_round_down
@@ -532,21 +536,50 @@ def run_session_analysis(
     if isinstance(allsky_cal_report.get("warnings"), list):
         warnings.extend(str(item) for item in allsky_cal_report["warnings"])
 
+    fisheye = select_fisheye_config(
+        project_root,
+        camera_name=allsky_metadata.camera,
+        filename=allsky_metadata.filename,
+        width=allsky_metadata.width,
+        height=allsky_metadata.height,
+    )
+    allsky_offset_method = "unknown"
+    allsky_offset_diagnostics: dict[str, Any] = {}
     if allsky_metadata.source_type == "raw" or bool(allsky_cal_report.get("offset_removed")):
         current_allsky_offset = 0.0
         allsky_offset_known = True
+        allsky_offset_method = "calibration_or_raw_loader"
     elif allsky_bias_offset_adu is not None and math.isfinite(allsky_bias_offset_adu):
         current_allsky_offset = float(allsky_bias_offset_adu)
         allsky_offset_known = True
+        allsky_offset_method = "user_supplied"
     elif allsky_metadata.offset_setting is not None:
         current_allsky_offset = float(allsky_metadata.offset_setting)
         allsky_offset_known = True
+        allsky_offset_method = "fits_header"
     else:
         current_allsky_offset = 0.0
         allsky_offset_known = False
-        warnings.append(
-            "전천 FITS의 Bias/offset을 확인하지 못했습니다. 방향비는 계산하지만 단위시간 절대 배경률의 신뢰도를 낮춥니다."
-        )
+        if not bool(allsky_cal_report.get("flat_frames")):
+            estimated_offset, offset_diag = estimate_apicam_masked_pedestal(
+                allsky_original.intensity,
+                fisheye,
+                camera_name=allsky_metadata.camera,
+                filename=allsky_metadata.filename,
+            )
+            allsky_offset_diagnostics = offset_diag
+            if estimated_offset is not None:
+                current_allsky_offset = float(estimated_offset)
+                allsky_offset_known = True
+                allsky_offset_method = "apicam_masked_outer_field"
+                warnings.append(
+                    f"APICAM 전천영상의 180° 영상원 밖 비조명 영역에서 동일 프레임의 "
+                    f"bias+dark pedestal를 {current_allsky_offset:.1f} ADU로 추정했습니다."
+                )
+        if not allsky_offset_known:
+            warnings.append(
+                "전천 FITS의 Bias/offset을 확인하지 못했습니다. 방향비는 계산하지만 단위시간 절대 배경률의 신뢰도를 낮춥니다."
+            )
 
     sky_settings = AnalysisSettings(
         current_exposure_sec=1.0,
@@ -558,13 +591,6 @@ def run_session_analysis(
         minimum_sky_altitude_deg=minimum_sky_altitude_deg,
         az_bins=az_bins,
         alt_bins=alt_bins,
-    )
-    fisheye = select_fisheye_config(
-        project_root,
-        camera_name=allsky_metadata.camera,
-        filename=allsky_metadata.filename,
-        width=allsky_metadata.width,
-        height=allsky_metadata.height,
     )
     fisheye_errors = validate_fisheye_directional_calibration(fisheye)
     compact_allsky_frame = prepare_sky_analysis_frame(allsky_frame)
@@ -746,6 +772,8 @@ def run_session_analysis(
             "allsky_median_adu_raw": sky.sky_median_adu,
             "allsky_offset_adu": current_allsky_offset,
             "allsky_offset_known": allsky_offset_known,
+            "allsky_offset_method": allsky_offset_method,
+            "allsky_offset_diagnostics": allsky_offset_diagnostics,
             "target_allsky_background_adu": corrected_target_background,
             "allsky_median_adu": corrected_sky_median,
             "telescope_background_adu_per_sec_per_pixel": bg_rate_adu,

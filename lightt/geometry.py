@@ -125,6 +125,97 @@ def _theta_from_radial_radius(
     return theta
 
 
+
+def estimate_apicam_masked_pedestal(
+    image: np.ndarray,
+    config: FisheyeConfig,
+    *,
+    camera_name: str | None = None,
+    filename: str | None = None,
+) -> tuple[float | None, dict[str, float | int | str]]:
+    """Estimate APICAM's frame-local electronic pedestal from optically dark pixels.
+
+    APICAM-3 projects an approximately 180-degree circular fisheye image onto a
+    square 4096x4096 detector. Pixels sufficiently *outside* the calibrated
+    horizon circle are not part of the sky image, so their robust median gives a
+    same-exposure estimate of the combined bias + dark pedestal. This fallback
+    is intentionally restricted to positively identified APICAM frames and is
+    used only when no explicit bias/offset calibration is available.
+
+    The estimator keeps a generous margin beyond the fitted 90-degree horizon
+    to avoid edge glow/vignetting. It returns diagnostics so the provenance is
+    visible in result/profile JSON.
+    """
+    identity = " ".join([str(camera_name or ""), str(filename or "")]).upper()
+    arr = np.asarray(image)
+    diagnostics: dict[str, float | int | str] = {
+        "method": "apicam_masked_outer_field",
+        "status": "unavailable",
+    }
+    if "APICAM" not in identity or arr.ndim != 2:
+        diagnostics["reason"] = "not_apicam"
+        return None, diagnostics
+    if config.mode != "calibrated_camera_model":
+        diagnostics["reason"] = "unsupported_fisheye_mode"
+        return None, diagnostics
+    if any(value is None for value in (config.center_x, config.center_y, config.focal_length_px)):
+        diagnostics["reason"] = "incomplete_geometry"
+        return None, diagnostics
+    if config.sensor_width and config.sensor_height:
+        if arr.shape != (int(config.sensor_height), int(config.sensor_width)):
+            diagnostics["reason"] = "unexpected_dimensions"
+            return None, diagnostics
+
+    theta = math.pi / 2.0
+    radial_factor = 1.0
+    for index, coefficient in enumerate(config.radial_theta_coefficients, start=1):
+        radial_factor += float(coefficient) * theta ** (2 * index)
+    horizon_radius = float(config.focal_length_px) * theta * radial_factor
+    if not math.isfinite(horizon_radius) or horizon_radius <= 0:
+        diagnostics["reason"] = "invalid_horizon_radius"
+        return None, diagnostics
+
+    # Keep at least ~3% of the horizon radius beyond the fitted sky edge.  For
+    # the ESO APICAM calibration this is about 57 px; 70 px is used as a
+    # conservative minimum to stay clear of the bright rim.
+    margin = max(70.0, 0.03 * horizon_radius)
+    cutoff = horizon_radius + margin
+    yy, xx = np.ogrid[: arr.shape[0], : arr.shape[1]]
+    mask = (xx - float(config.center_x)) ** 2 + (yy - float(config.center_y)) ** 2 >= cutoff**2
+    values = np.asarray(arr[mask], dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size < 50_000:
+        diagnostics["reason"] = "too_few_masked_pixels"
+        diagnostics["sample_count"] = int(values.size)
+        return None, diagnostics
+
+    # The median is highly resistant to stars, hot pixels and isolated light
+    # leaks.  Percentile width is used only as a sanity check on whether the
+    # supposedly dark outer field is actually dominated by a stable pedestal.
+    p01, p05, med, p95, p99 = np.percentile(values, [1.0, 5.0, 50.0, 95.0, 99.0])
+    width_90 = float(p95 - p05)
+    allowed_width = max(100.0, 0.25 * max(abs(float(med)), 1.0))
+    diagnostics.update(
+        {
+            "status": "ok",
+            "sample_count": int(values.size),
+            "horizon_radius_px": float(horizon_radius),
+            "margin_px": float(margin),
+            "cutoff_radius_px": float(cutoff),
+            "p01_adu": float(p01),
+            "p05_adu": float(p05),
+            "median_adu": float(med),
+            "p95_adu": float(p95),
+            "p99_adu": float(p99),
+            "p95_minus_p05_adu": width_90,
+        }
+    )
+    if not math.isfinite(float(med)) or width_90 > allowed_width:
+        diagnostics["status"] = "rejected"
+        diagnostics["reason"] = "outer_field_not_uniform"
+        return None, diagnostics
+    return float(med), diagnostics
+
 def validate_fisheye_calibration(config: FisheyeConfig) -> list[str]:
     """Return reasons why a fisheye model should not be treated as quantitative."""
     errors: list[str] = []
