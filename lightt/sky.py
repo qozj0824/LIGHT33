@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.ticker import ScalarFormatter
 from scipy import ndimage
 
 from .geometry import pixel_solid_angle_arcsec2, pixel_to_altaz, validate_fisheye_calibration
@@ -262,22 +263,39 @@ def build_sky_map(
     min_alt = settings.minimum_sky_altitude_deg
     sky_geometry = valid & finite & (alt >= min_alt) & (alt <= 90)
     usable = sky_geometry & ~star_mask
-    if np.count_nonzero(usable) < 1000:
+    usable_pixel_count = int(np.count_nonzero(usable))
+    minimum_usable_pixels = min(1000, max(300, int(np.count_nonzero(sky_geometry) * 0.03)))
+    if usable_pixel_count < minimum_usable_pixels:
         raise ValueError(
-            "최저 고도와 별 마스크를 적용한 뒤 사용할 하늘 픽셀이 부족합니다. "
+            f"최저 고도와 별 마스크를 적용한 뒤 사용할 하늘 픽셀이 부족합니다"
+            f"({usable_pixel_count:,} < {minimum_usable_pixels:,}). "
             "어안 보정, 전천 영상, 최저 고도를 확인하세요."
         )
 
-    az_edges = np.linspace(0.0, 360.0, settings.az_bins + 1)
-    alt_edges = np.linspace(0.0, 90.0, settings.alt_bins + 1)
+    az_bins = int(settings.az_bins)
+    alt_bins = int(settings.alt_bins)
+    requested_cell_count = az_bins * alt_bins
+    maximum_supported_cells = max(72, usable_pixel_count // 30)
+    adaptive_grid_note = None
+    if requested_cell_count > maximum_supported_cells:
+        scale = math.sqrt(maximum_supported_cells / requested_cell_count)
+        az_bins = max(12, int(math.floor(az_bins * scale / 2.0) * 2))
+        alt_bins = max(6, int(math.floor(alt_bins * scale)))
+        adaptive_grid_note = (
+            f"입력 해상도와 유효 픽셀 수에 맞춰 전천 격자를 {settings.az_bins}×{settings.alt_bins}에서 "
+            f"{az_bins}×{alt_bins}로 자동 조정했습니다."
+        )
+
+    az_edges = np.linspace(0.0, 360.0, az_bins + 1)
+    alt_edges = np.linspace(0.0, 90.0, alt_bins + 1)
     cells: list[SkyCell] = []
-    for alt_index in range(settings.alt_bins):
+    for alt_index in range(alt_bins):
         alt_lo, alt_hi = alt_edges[alt_index], alt_edges[alt_index + 1]
         alt_center = float((alt_lo + alt_hi) / 2)
         alt_sel = (alt >= alt_lo) & (
-            alt < alt_hi if alt_index < settings.alt_bins - 1 else alt <= alt_hi
+            alt < alt_hi if alt_index < alt_bins - 1 else alt <= alt_hi
         )
-        for az_index in range(settings.az_bins):
+        for az_index in range(az_bins):
             az_lo, az_hi = az_edges[az_index], az_edges[az_index + 1]
             cell_geom = valid & finite & alt_sel & (az >= az_lo) & (az < az_hi)
             n_geom = int(np.count_nonzero(cell_geom))
@@ -341,8 +359,8 @@ def build_sky_map(
     # discontinuities.  The threshold is intentionally strict so genuine directional
     # sky-brightness gradients are retained as sky signal.
     obstruction_rejections = 0
-    for alt_index in range(settings.alt_bins):
-        row = cells[alt_index * settings.az_bins:(alt_index + 1) * settings.az_bins]
+    for alt_index in range(alt_bins):
+        row = cells[alt_index * az_bins:(alt_index + 1) * az_bins]
         if not row:
             continue
         altitude = row[0].alt_center_deg
@@ -355,7 +373,7 @@ def build_sky_map(
             and cell.reliability in {"good", "caution", "low"}
             and math.isfinite(cell.background_adu)
         ]
-        if len(ring_values) < max(8, settings.az_bins // 8):
+        if len(ring_values) < max(8, az_bins // 8):
             continue
         ring_median = float(np.median(np.asarray(ring_values, dtype=float)))
         if ring_median <= 0:
@@ -409,6 +427,8 @@ def build_sky_map(
         "전천지도는 망원경 대상 신호나 현재 SNR을 변경하지 않습니다.",
         f"고도 {min_alt:.1f}° 아래는 건물·나무·지상광 영향을 줄이기 위해 차폐 처리했습니다.",
     ]
+    if adaptive_grid_note:
+        notes.append(adaptive_grid_note)
     if obstruction_rejections:
         notes.append(f"저고도에서 같은 고도대 대비 극단적으로 어두운 {obstruction_rejections}개 셀을 고체 장애물 의심 영역으로 추가 차폐했습니다.")
     if not flat_applied:
@@ -498,11 +518,11 @@ def build_sky_map(
     fig.savefig(coordinate_overlay_path, dpi=160)
     plt.close(fig)
 
-    grid = np.full((settings.alt_bins, settings.az_bins), np.nan)
-    reliability_grid = np.full((settings.alt_bins, settings.az_bins), np.nan)
+    grid = np.full((alt_bins, az_bins), np.nan)
+    reliability_grid = np.full((alt_bins, az_bins), np.nan)
     rel_value = {"blocked": -1, "missing": 0, "low": 1, "caution": 2, "good": 3}
     for index, cell in enumerate(cells):
-        ai, zi = divmod(index, settings.az_bins)
+        ai, zi = divmod(index, az_bins)
         grid[ai, zi] = np.nan if cell.background_adu is None else cell.background_adu
         reliability_grid[ai, zi] = rel_value[cell.reliability]
 
@@ -643,8 +663,9 @@ def build_sky_map(
     # made a 2200 ADU test image look like it was centered at 0.
     try:
         formatter = ax.xaxis.get_major_formatter()
-        formatter.set_useOffset(False)
-        formatter.set_scientific(False)
+        if isinstance(formatter, ScalarFormatter):
+            formatter.set_useOffset(False)
+            formatter.set_scientific(False)
     except Exception:
         pass
     ax.set_xlabel(plot_text("셀별 하늘 배경 ADU", "Sky background ADU per cell"))

@@ -41,6 +41,14 @@ def load_fisheye_config(path: Path) -> FisheyeConfig:
         validation_basis=str(data.get("validation_basis") or "") or None,
         calibration_date=str(data.get("calibration_date") or "") or None,
         camera_lens_id=str(data.get("camera_lens_id") or "") or None,
+        selection_source=str(data.get("selection_source") or "configuration_file"),
+        geometry_confidence=str(data.get("geometry_confidence") or "high"),
+        orientation_confidence=str(data.get("orientation_confidence") or "high"),
+        geometry_diagnostics=(
+            dict(data.get("geometry_diagnostics"))
+            if isinstance(data.get("geometry_diagnostics"), dict)
+            else {}
+        ),
     )
 
 
@@ -68,25 +76,172 @@ def select_fisheye_config(
     filename: str | None = None,
     width: int | None = None,
     height: int | None = None,
+    image: np.ndarray | None = None,
 ) -> FisheyeConfig:
-    """Choose the directional calibration that belongs to the actual all-sky camera.
+    """Select only a positively matched camera calibration.
 
-    v35.5 had one global Canon/Sigma calibration, which meant a square APICAM
-    frame was either rejected for aspect ratio or, worse, could be interpreted
-    with the wrong optical model.  APICAM is selected only by instrument/file
-    identity; a generic 4096x4096 image is *not* assumed to be APICAM.
+    Unknown cameras must never inherit the bundled Canon or APICAM geometry.
+    For them, a circular footprint is inferred when the frame itself supports
+    that inference; otherwise a centered equidistant diagnostic model is used.
+    The automatic model intentionally has low orientation confidence because a
+    single un-plate-solved image cannot reveal true north reliably.
     """
     identity = " ".join([str(camera_name or ""), str(filename or "")]).upper()
     if "APICAM" in identity:
         candidate = project_root / "config" / "fisheye_apicam.json"
         if candidate.exists():
             config = load_fisheye_config(candidate)
+            config.selection_source = "camera_identity:apicam"
+            config.geometry_confidence = "high"
+            config.orientation_confidence = "planning"
             if width is not None and height is not None:
                 # Keep the identity decision separate from the size check.  The
                 # normal sky-map geometry validator gives a precise error later.
                 _ = (width, height)
             return config
-    return load_fisheye_config(project_root / "config" / "fisheye.json")
+    shape = None
+    if image is not None and np.asarray(image).ndim == 2:
+        array_shape = np.asarray(image).shape
+        shape = (int(array_shape[0]), int(array_shape[1]))
+    elif width and height:
+        shape = (int(height), int(width))
+    if shape is None:
+        shape = (max(int(height or 1), 1), max(int(width or 1), 1))
+    center_x, center_y, radius, diagnostics = infer_circular_fisheye_geometry(image, shape)
+    return FisheyeConfig(
+        mode="auto_equidistant",
+        center_x=center_x,
+        center_y=center_y,
+        horizon_radius=radius,
+        sensor_width=shape[1],
+        sensor_height=shape[0],
+        north_offset_deg=0.0,
+        selection_source=str(diagnostics.get("source", "centered_fallback")),
+        geometry_confidence=str(diagnostics.get("confidence", "low")),
+        orientation_confidence="unknown",
+        geometry_diagnostics=diagnostics,
+    )
+
+
+def infer_circular_fisheye_geometry(
+    image: np.ndarray | None,
+    shape: tuple[int, int],
+) -> tuple[float, float, float, dict[str, float | int | str]]:
+    """Infer a circular sky footprint without assuming a camera brand.
+
+    The estimator looks for a stable outer detector field surrounding a more
+    variable illuminated circle.  It rejects weak/non-circular evidence and
+    falls back to centered geometry instead of fabricating a precise solution.
+    """
+    height, width = shape
+    fallback_x, fallback_y, fallback_radius = auto_geometry(shape)
+    diagnostics: dict[str, float | int | str] = {
+        "source": "centered_fallback",
+        "confidence": "low",
+        "center_x_px": float(fallback_x),
+        "center_y_px": float(fallback_y),
+        "horizon_radius_px": float(fallback_radius),
+    }
+    if image is None:
+        diagnostics["reason"] = "pixel_data_unavailable"
+        return fallback_x, fallback_y, fallback_radius, diagnostics
+    arr = np.asarray(image)
+    if arr.ndim != 2 or min(arr.shape) < 64:
+        diagnostics["reason"] = "image_too_small_or_not_2d"
+        return fallback_x, fallback_y, fallback_radius, diagnostics
+
+    from scipy import ndimage
+
+    scale = max(arr.shape) / 512.0
+    step = max(1, int(math.ceil(scale)))
+    sample = np.asarray(arr[::step, ::step], dtype=np.float64)
+    finite = np.isfinite(sample)
+    if np.count_nonzero(finite) < sample.size * 0.90:
+        diagnostics["reason"] = "too_many_nonfinite_pixels"
+        return fallback_x, fallback_y, fallback_radius, diagnostics
+    fill = float(np.nanmedian(sample[finite]))
+    sample = np.where(finite, sample, fill)
+    edge = max(2, int(round(min(sample.shape) * 0.025)))
+    border = np.concatenate(
+        [
+            sample[:edge, :].ravel(),
+            sample[-edge:, :].ravel(),
+            sample[:, :edge].ravel(),
+            sample[:, -edge:].ravel(),
+        ]
+    )
+    border_median = float(np.median(border))
+    border_mad = float(np.median(np.abs(border - border_median)))
+    sample_percentiles = np.asarray(np.percentile(sample, [1.0, 99.0]), dtype=np.float64)
+    epsilon = float(np.finfo(np.float64).eps)
+    dynamic = max(float(sample_percentiles[1] - sample_percentiles[0]), epsilon)
+    threshold = max(8.0 * 1.4826 * border_mad, 0.025 * dynamic)
+    active = np.abs(sample - border_median) > threshold
+    active = ndimage.binary_closing(active, iterations=max(1, min(sample.shape) // 128))
+    active = ndimage.binary_fill_holes(active)
+    labels, count = ndimage.label(active)
+    if count <= 0:
+        diagnostics["reason"] = "no_illuminated_footprint"
+        return fallback_x, fallback_y, fallback_radius, diagnostics
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    component = labels == int(np.argmax(sizes))
+    yy, xx = np.nonzero(component)
+    if xx.size < sample.size * 0.08:
+        diagnostics["reason"] = "footprint_too_small"
+        return fallback_x, fallback_y, fallback_radius, diagnostics
+    x0, x1 = int(xx.min()), int(xx.max())
+    y0, y1 = int(yy.min()), int(yy.max())
+    box_width = x1 - x0 + 1
+    box_height = y1 - y0 + 1
+    aspect = box_width / max(box_height, 1)
+    radius_small = 0.25 * (box_width + box_height)
+    center_x_small = 0.5 * (x0 + x1)
+    center_y_small = 0.5 * (y0 + y1)
+    circle_area = math.pi * max(radius_small, 1.0) ** 2
+    fill_ratio = float(xx.size / circle_area)
+    outer_fraction = 1.0 - float(xx.size / sample.size)
+    center_ok = (
+        abs(center_x_small - (sample.shape[1] - 1) / 2.0) <= sample.shape[1] * 0.22
+        and abs(center_y_small - (sample.shape[0] - 1) / 2.0) <= sample.shape[0] * 0.22
+    )
+    plausible = (
+        0.78 <= aspect <= 1.28
+        and 0.45 <= fill_ratio <= 1.30
+        and 0.02 <= outer_fraction <= 0.75
+        and center_ok
+    )
+    diagnostics.update(
+        {
+            "border_median_adu": border_median,
+            "border_mad_adu": border_mad,
+            "detection_threshold_adu": float(threshold),
+            "footprint_aspect": float(aspect),
+            "footprint_fill_ratio": float(fill_ratio),
+            "outer_fraction": float(outer_fraction),
+            "sample_step": int(step),
+        }
+    )
+    if not plausible:
+        diagnostics["reason"] = "circular_evidence_rejected"
+        return fallback_x, fallback_y, fallback_radius, diagnostics
+
+    scale_x = width / sample.shape[1]
+    scale_y = height / sample.shape[0]
+    center_x = (center_x_small + 0.5) * scale_x - 0.5
+    center_y = (center_y_small + 0.5) * scale_y - 0.5
+    radius = radius_small * math.sqrt(scale_x * scale_y)
+    confidence = "medium" if border_mad <= 0.02 * dynamic else "low"
+    diagnostics.update(
+        {
+            "source": "inferred_circular_footprint",
+            "confidence": confidence,
+            "center_x_px": float(center_x),
+            "center_y_px": float(center_y),
+            "horizon_radius_px": float(radius),
+        }
+    )
+    return float(center_x), float(center_y), float(radius), diagnostics
 
 
 def _rotation_matrix_from_rotvec(rotation_vector: list[float]) -> np.ndarray:
@@ -173,75 +328,105 @@ def _theta_from_radial_radius(
 
 
 
-def estimate_apicam_masked_pedestal(
+def _configured_horizon_radius(config: FisheyeConfig) -> float | None:
+    if config.horizon_radius is not None and config.horizon_radius > 0:
+        return float(config.horizon_radius)
+    if config.mode == "calibrated_camera_model" and config.focal_length_px:
+        theta = math.pi / 2.0
+        radial_factor = 1.0
+        for index, coefficient in enumerate(config.radial_theta_coefficients, start=1):
+            radial_factor += float(coefficient) * theta ** (2 * index)
+        radius = float(config.focal_length_px) * theta * radial_factor
+        return radius if math.isfinite(radius) and radius > 0 else None
+    if config.mode == "calibrated_kannala_brandt" and config.coefficients:
+        # theta(r) is monotonic over the calibrated 180-degree field.  Bisection
+        # avoids coupling the pedestal fallback to a camera-specific inverse.
+        low = 0.0
+        high = float(max(config.sensor_width or 1, config.sensor_height or 1))
+        target = math.pi / 2.0
+        for _ in range(60):
+            middle = (low + high) / 2.0
+            theta = float(odd_polynomial_theta(np.asarray([middle]), config.coefficients)[0])
+            if theta < target:
+                low = middle
+            else:
+                high = middle
+        radius = (low + high) / 2.0
+        return radius if math.isfinite(radius) and radius > 0 else None
+    return None
+
+
+def estimate_masked_outer_field_pedestal(
     image: np.ndarray,
     config: FisheyeConfig,
-    *,
-    camera_name: str | None = None,
-    filename: str | None = None,
 ) -> tuple[float | None, dict[str, float | int | str]]:
-    """Estimate APICAM's frame-local electronic pedestal from optically dark pixels.
+    """Estimate a pedestal only when an optically dark outer field is proven.
 
-    APICAM-3 projects an approximately 180-degree circular fisheye image onto a
-    square 4096x4096 detector. Pixels sufficiently *outside* the calibrated
-    horizon circle are not part of the sky image, so their robust median gives a
-    same-exposure estimate of the combined bias + dark pedestal. This fallback
-    is intentionally restricted to positively identified APICAM frames and is
-    used only when no explicit bias/offset calibration is available.
-
-    The estimator keeps a generous margin beyond the fitted 90-degree horizon
-    to avoid edge glow/vignetting. It returns diagnostics so the provenance is
-    visible in result/profile JSON.
+    This is camera-agnostic.  It needs a circular horizon geometry, sufficient
+    detector area beyond that circle, a uniform outer distribution, and clear
+    contrast between the sky circle and the outer field.  Rejection is the safe
+    result for full-frame projections and weak evidence.
     """
-    identity = " ".join([str(camera_name or ""), str(filename or "")]).upper()
     arr = np.asarray(image)
     diagnostics: dict[str, float | int | str] = {
-        "method": "apicam_masked_outer_field",
+        "method": "masked_outer_field",
         "status": "unavailable",
     }
-    if "APICAM" not in identity or arr.ndim != 2:
-        diagnostics["reason"] = "not_apicam"
+    if arr.ndim != 2:
+        diagnostics["reason"] = "not_2d"
         return None, diagnostics
-    if config.mode != "calibrated_camera_model":
-        diagnostics["reason"] = "unsupported_fisheye_mode"
-        return None, diagnostics
-    if any(value is None for value in (config.center_x, config.center_y, config.focal_length_px)):
+    if config.center_x is None or config.center_y is None:
         diagnostics["reason"] = "incomplete_geometry"
         return None, diagnostics
     if config.sensor_width and config.sensor_height:
         if arr.shape != (int(config.sensor_height), int(config.sensor_width)):
             diagnostics["reason"] = "unexpected_dimensions"
             return None, diagnostics
-
-    theta = math.pi / 2.0
-    radial_factor = 1.0
-    for index, coefficient in enumerate(config.radial_theta_coefficients, start=1):
-        radial_factor += float(coefficient) * theta ** (2 * index)
-    horizon_radius = float(config.focal_length_px) * theta * radial_factor
-    if not math.isfinite(horizon_radius) or horizon_radius <= 0:
+    horizon_radius = _configured_horizon_radius(config)
+    if horizon_radius is None:
         diagnostics["reason"] = "invalid_horizon_radius"
         return None, diagnostics
 
-    # Keep at least ~3% of the horizon radius beyond the fitted sky edge.  For
-    # the ESO APICAM calibration this is about 57 px; 70 px is used as a
-    # conservative minimum to stay clear of the bright rim.
-    margin = max(70.0, 0.03 * horizon_radius)
+    margin = max(4.0, 0.035 * horizon_radius)
     cutoff = horizon_radius + margin
-    yy, xx = np.ogrid[: arr.shape[0], : arr.shape[1]]
-    mask = (xx - float(config.center_x)) ** 2 + (yy - float(config.center_y)) ** 2 >= cutoff**2
-    values = np.asarray(arr[mask], dtype=np.float64)
+    # Pedestal statistics do not need every detector pixel.  Limit the working
+    # grid to roughly 1.5M samples so 4k/8k inputs do not allocate multiple
+    # full-frame float64 radius maps on small Render workers.
+    sample_step = max(1, int(math.ceil(math.sqrt(arr.size / 1_500_000.0))))
+    sampled = np.asarray(arr[::sample_step, ::sample_step])
+    center_x = (float(config.center_x) + 0.5) / sample_step - 0.5
+    center_y = (float(config.center_y) + 0.5) / sample_step - 0.5
+    sampled_horizon_radius = horizon_radius / sample_step
+    sampled_cutoff = cutoff / sample_step
+    yy, xx = np.ogrid[: sampled.shape[0], : sampled.shape[1]]
+    radius_squared = (xx - center_x) ** 2 + (yy - center_y) ** 2
+    mask = radius_squared >= sampled_cutoff**2
+    values = np.asarray(sampled[mask], dtype=np.float64)
     values = values[np.isfinite(values)]
-    if values.size < 50_000:
+    minimum_samples = max(5_000, int(sampled.size * 0.005))
+    if values.size < minimum_samples:
         diagnostics["reason"] = "too_few_masked_pixels"
         diagnostics["sample_count"] = int(values.size)
         return None, diagnostics
 
-    # The median is highly resistant to stars, hot pixels and isolated light
-    # leaks.  Percentile width is used only as a sanity check on whether the
-    # supposedly dark outer field is actually dominated by a stable pedestal.
-    p01, p05, med, p95, p99 = np.percentile(values, [1.0, 5.0, 50.0, 95.0, 99.0])
+    outer_percentiles = np.asarray(
+        np.percentile(values, [1.0, 5.0, 50.0, 95.0, 99.0]),
+        dtype=np.float64,
+    )
+    p01, p05, med, p95, p99 = (float(value) for value in outer_percentiles)
     width_90 = float(p95 - p05)
-    allowed_width = max(100.0, 0.25 * max(abs(float(med)), 1.0))
+    finite_all = np.asarray(sampled[np.isfinite(sampled)], dtype=np.float64)
+    global_percentiles = np.asarray(np.percentile(finite_all, [1.0, 99.0]), dtype=np.float64)
+    epsilon = float(np.finfo(np.float64).eps)
+    global_dynamic = max(float(global_percentiles[1] - global_percentiles[0]), epsilon)
+    allowed_width = max(0.10 * global_dynamic, 0.20 * max(abs(float(med)), global_dynamic * 0.01))
+    inner_mask = radius_squared <= (0.75 * sampled_horizon_radius) ** 2
+    inner_values = np.asarray(sampled[inner_mask], dtype=np.float64)
+    inner_values = inner_values[np.isfinite(inner_values)]
+    inner_median = float(np.median(inner_values)) if inner_values.size else float("nan")
+    contrast = inner_median - float(med)
+    outer_sigma = max(width_90 / 3.29, epsilon)
+    minimum_contrast = max(3.0 * outer_sigma, 0.01 * global_dynamic)
     diagnostics.update(
         {
             "status": "ok",
@@ -249,19 +434,49 @@ def estimate_apicam_masked_pedestal(
             "horizon_radius_px": float(horizon_radius),
             "margin_px": float(margin),
             "cutoff_radius_px": float(cutoff),
+            "sample_step": int(sample_step),
             "p01_adu": float(p01),
             "p05_adu": float(p05),
             "median_adu": float(med),
             "p95_adu": float(p95),
             "p99_adu": float(p99),
             "p95_minus_p05_adu": width_90,
+            "allowed_width_adu": float(allowed_width),
+            "inner_median_adu": inner_median,
+            "inner_minus_outer_adu": float(contrast),
+            "minimum_contrast_adu": float(minimum_contrast),
+            "geometry_source": config.selection_source,
         }
     )
     if not math.isfinite(float(med)) or width_90 > allowed_width:
         diagnostics["status"] = "rejected"
         diagnostics["reason"] = "outer_field_not_uniform"
         return None, diagnostics
+    if not math.isfinite(inner_median) or contrast <= minimum_contrast:
+        diagnostics["status"] = "rejected"
+        diagnostics["reason"] = "outer_field_not_proven_dark"
+        return None, diagnostics
     return float(med), diagnostics
+
+
+def estimate_apicam_masked_pedestal(
+    image: np.ndarray,
+    config: FisheyeConfig,
+    *,
+    camera_name: str | None = None,
+    filename: str | None = None,
+) -> tuple[float | None, dict[str, float | int | str]]:
+    """Backward-compatible APICAM wrapper around the generic estimator."""
+    identity = " ".join([str(camera_name or ""), str(filename or "")]).upper()
+    if "APICAM" not in identity:
+        return None, {
+            "method": "apicam_masked_outer_field",
+            "status": "unavailable",
+            "reason": "not_apicam",
+        }
+    value, diagnostics = estimate_masked_outer_field_pedestal(image, config)
+    diagnostics["method"] = "apicam_masked_outer_field"
+    return value, diagnostics
 
 def validate_fisheye_calibration(config: FisheyeConfig) -> list[str]:
     """Return reasons why a fisheye model should not be treated as quantitative."""

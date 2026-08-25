@@ -29,6 +29,8 @@ def profile(**overrides):
         c_sys_quality="good",
         reference_allsky_camera="Canon EOS R",
         reference_allsky_gain_setting=400.0,
+        reference_allsky_source_type="raw",
+        reference_allsky_dtype="uint16",
         reference_allsky_width=3360,
         reference_allsky_height=2240,
         reference_allsky_flat_applied=False,
@@ -144,6 +146,93 @@ def test_target_snr_changes_frames_not_single_exposure_when_constraints_same():
     assert high["frames"] > low["frames"]
 
 
+def test_session_plan_honors_110_second_user_max_above_sky_lower():
+    p = profile(
+        gain_e_per_adu=1.25,
+        read_noise_e=2.7,
+        dark_current_e_per_pix_sec=0.0,
+        reference_peak_e_per_sec=521.0,
+    )
+    result = _build_plan(
+        profile=p,
+        target={"target_mode": "extended"},
+        background_rate_adu_per_pix=0.595452380173163,
+        target_signal_rate_e=100.0,
+        effective_pixels=100,
+        target_snr=150.0,
+        min_sub_exposure_sec=1.0,
+        max_sub_exposure_sec=110.0,
+        tracking_limit_sec=0.0,
+        background_limit_fraction=0.30,
+        saturation_safety_fraction=0.80,
+        stack_efficiency=0.90,
+        max_frames=2000,
+        frame_overhead_sec=2.0,
+    )
+    assert 48.0 < result["sky_limited_lower_sec"] < 50.0
+    assert result["recommended_sub_exposure_sec"] == 110.0
+    assert result["practical_upper_sec"] == 110.0
+    assert result["limiting_constraint"] == "user_max"
+    assert result["constraint_inputs"]["max_sub_exposure_sec"] == 110.0
+    assert result["constraint_status"] == "sky_limited"
+
+
+def test_session_plan_changes_when_user_max_changes():
+    p = profile(reference_peak_e_per_sec=None)
+    common = dict(
+        profile=p,
+        target={"target_mode": "extended"},
+        background_rate_adu_per_pix=1.0,
+        target_signal_rate_e=30.0,
+        effective_pixels=100,
+        target_snr=100.0,
+        min_sub_exposure_sec=1.0,
+        tracking_limit_sec=0.0,
+        background_limit_fraction=0.30,
+        saturation_safety_fraction=0.80,
+        stack_efficiency=0.90,
+        max_frames=100000,
+        frame_overhead_sec=2.0,
+    )
+    short = _build_plan(max_sub_exposure_sec=110.0, **common)
+    long = _build_plan(max_sub_exposure_sec=600.0, **common)
+    assert short["recommended_sub_exposure_sec"] == 110.0
+    assert long["recommended_sub_exposure_sec"] == 600.0
+
+
+def test_session_plan_reports_read_noise_compromise_without_crashing():
+    p = profile(read_noise_e=12.0, reference_peak_e_per_sec=None)
+    result = _build_plan(
+        profile=p,
+        target={"target_mode": "extended"},
+        background_rate_adu_per_pix=0.05,
+        target_signal_rate_e=10.0,
+        effective_pixels=100,
+        target_snr=50.0,
+        min_sub_exposure_sec=1.0,
+        max_sub_exposure_sec=30.0,
+        tracking_limit_sec=0.0,
+        background_limit_fraction=0.30,
+        saturation_safety_fraction=0.80,
+        stack_efficiency=0.90,
+        max_frames=100000,
+        frame_overhead_sec=2.0,
+    )
+    assert result["recommended_sub_exposure_sec"] == 30.0
+    assert result["constraint_status"] == "upper_bound_compromise"
+    assert result["sky_limited_feasible"] is False
+
+
+def test_non_v_broadband_filter_is_marked_approximate():
+    p = profile(filter_name="I_BESS", photometric_zero_point_mag=20.0, reference_airmass=1.0)
+    target = {"target_mode": "point", "vmag": 12.0, "size_deg": 0.0, "alt_deg": 60.0}
+    total, per_pixel, source, warnings, diagnostics = _signal_model(p, target, 25, None, None)
+    assert total is not None and per_pixel is not None
+    assert source == "catalog_magnitude_filter_mismatch_approximation"
+    assert diagnostics["filter_v_band_match"] is False
+    assert any("같은 대역" in item for item in warnings)
+
+
 def test_csys_is_not_used_when_current_allsky_gain_differs():
     p = profile(c_sys=2.5, reference_background_adu_per_pix_sec=20)
     rate, method, warnings = _background_rate(
@@ -225,6 +314,39 @@ def test_plan_confidence_never_upgrades_low_profile():
     assert result["confidence"] == "low"
 
 
+def test_saved_profile_validation_disables_bad_optional_values():
+    from lightt.equipment import validate_equipment_profile
+
+    p = profile(
+        c_sys=-1.0,
+        c_sys_quality="good",
+        sensor_clip_adu=-5.0,
+        pixel_scale_arcsec=0.0,
+    )
+    validated = validate_equipment_profile(p)
+    assert validated.c_sys is None
+    assert validated.c_sys_quality == "unavailable"
+    assert validated.sensor_clip_adu is None
+    assert validated.pixel_scale_arcsec is None
+    assert validated.warnings
+
+
+def test_saved_profile_validation_repairs_corrupt_schema_and_bounded_values():
+    from lightt.equipment import PROFILE_SCHEMA_VERSION, validate_equipment_profile
+
+    p = profile(
+        schema_version="broken",
+        extinction_k_mag_per_airmass=-2.0,
+        reference_psf_peak_fraction=1.4,
+    )
+    validated = validate_equipment_profile(p)
+    assert validated.schema_version == PROFILE_SCHEMA_VERSION
+    assert math.isclose(validated.extinction_k_mag_per_airmass, 0.20)
+    assert validated.reference_psf_peak_fraction is None
+    assert any("형식 번호" in warning for warning in validated.warnings)
+    assert any("PSF peak" in warning for warning in validated.warnings)
+
+
 def test_session_time_alignment_accepts_close_times():
     from lightt.session import _time_alignment
 
@@ -259,6 +381,19 @@ def test_session_time_alignment_does_not_guess_rendered_exif_timezone():
     )
     assert delta is None
     assert notes
+
+
+def test_fixed_allsky_calibration_rejects_wrong_stellarium_location():
+    import pytest
+    from lightt.session import _location_alignment
+
+    target = {"latitude": 37.5, "longitude": 127.0}
+    with pytest.raises(ValueError, match="관측소 위도"):
+        _location_alignment(
+            target,
+            allsky_metadata(),
+            tracking_site_latitude_deg=-24.6276,
+        )
 
 
 def test_reference_image_star_peak_is_diagnostic_not_future_scene_hard_limit():

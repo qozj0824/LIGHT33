@@ -243,6 +243,7 @@ def run_analysis(
         filename=allsky_original.metadata.filename,
         width=allsky_original.metadata.width,
         height=allsky_original.metadata.height,
+        image=allsky_original.intensity,
     )
     fisheye_errors = validate_fisheye_calibration(fisheye)
     sky = build_sky_map(

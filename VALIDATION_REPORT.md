@@ -1,26 +1,22 @@
-# NØXIS v35.1 검증 보고서
+# NØXIS v36.0 검증 보고서
 
-검증일: 2026-08-20
+검증일: 2026-08-25
 
 ## 자동 테스트
 
 현재 제작 컨테이너에서 최종 소스 기준:
 
 ```text
-53 passed, 4 skipped
+89 passed
 ```
 
-skip 4건은 제작 컨테이너에 Astropy가 설치되어 있지 않아 실행되지 않은 FITS/Astropy 통합 테스트입니다. 배포 `requirements.txt`에는 `astropy==8.0.1`이 포함되어 있으며 일반 설치 환경에서는 `python -m pip install -r requirements.txt`로 설치합니다.
-
-skip 대상:
-- FITS calibration 통합
-- FITS intensity-domain 통합
-- FITS end-to-end
-- Astropy RA/Dec → Alt/Az 변환
+배포본과 동일한 `requirements-dev.txt` 격리 환경에서 FITS/Astropy 통합 테스트를 포함해 실행했습니다.
 
 ## 정적/서버 검사
 
 - Python `compileall`: 통과
+- Mypy (`app.py`, `lightt/`): 통과
+- Ruff (`app.py`, `lightt/`, v36 변경 테스트): 통과
 - `node --check static/app.js`: 통과
 - FastAPI server smoke test: 통과
 - HTML id 중복: 0
@@ -46,6 +42,12 @@ skip 대상:
 - 시간 불일치 시 오래된 Alt/Az 제거 및 시간 의존 보정 강등 검증
 - Stellarium `/api/main/time` Julian Day 설정 경로 검증
 - RAW/FITS ADU domain 및 sensor clipping 안전장치 관련 기존 회귀 테스트
+- 최대 단일노출 110초 입력이 45초로 잘못 축소되던 세션 플래너 회귀 테스트
+- 110초/600초/추적 상한/읽기잡음 하한 충돌의 제약 선택 테스트
+- 미등록 카메라의 원형 시야 감지, 외곽 pedestal 수락·거부, 방향 미상 중앙값 fallback
+- 저장 프로필의 잘못된 선택 값 자동 비활성화와 필수 센서 값 검증
+- 고정식 전천 보정 관측소와 Stellarium 위치 불일치 차단
+- I_BESS 등 비-V 필터에서 V등급 신호 모델 자동 강등
 
 ## 30 MP 합성 통합 smoke test
 

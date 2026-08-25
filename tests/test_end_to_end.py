@@ -5,11 +5,12 @@ import json
 
 import numpy as np
 import pytest
-fits = pytest.importorskip("astropy.io.fits")
 from fastapi.testclient import TestClient
 
 import app as app_module
 from lightt.models import FisheyeConfig
+
+fits = pytest.importorskip("astropy.io.fits")
 
 
 def fits_bytes(data: np.ndarray, exposure: float) -> bytes:
@@ -40,8 +41,8 @@ def test_full_api_generates_beginner_plan_and_polar_map(tmp_path, monkeypatch) -
     scope = np.clip(scope, 0, 60000)
 
     monkeypatch.setattr(
-        "lightt.pipeline.load_fisheye_config",
-        lambda _: FisheyeConfig(mode="auto_equidistant"),
+        "lightt.pipeline.select_fisheye_config",
+        lambda *args, **kwargs: FisheyeConfig(mode="auto_equidistant"),
     )
     client = TestClient(app_module.app)
     inspect_allsky = client.post(

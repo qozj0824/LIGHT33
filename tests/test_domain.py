@@ -4,10 +4,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-fits = pytest.importorskip("astropy.io.fits")
 
 from lightt.io import infer_intensity_domain, load_image
 from lightt.models import ImageFrame, ImageMetadata
+
+fits = pytest.importorskip("astropy.io.fits")
 
 
 def frame(data: np.ndarray, source: str = "fits", bit_depth: int | None = 16) -> ImageFrame:

@@ -468,7 +468,10 @@ def _compare_optional(
     relative_tolerance: float = 0.02,
     hard_error: bool = False,
 ) -> None:
+    if target_value is None and calibration_value is None:
+        return
     if target_value is None or calibration_value is None:
+        warnings.append(f"{role} 프레임의 {label} 일치 여부를 메타데이터에서 확인하지 못했습니다.")
         return
     if isinstance(target_value, str) or isinstance(calibration_value, str):
         equal = str(target_value).strip().lower() == str(calibration_value).strip().lower()

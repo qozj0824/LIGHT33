@@ -13,7 +13,7 @@ import numpy as np
 from . import __version__
 from .equipment import EquipmentProfile, airmass_from_altitude
 from .geometry import (
-    estimate_apicam_masked_pedestal,
+    estimate_masked_outer_field_pedestal,
     select_fisheye_config,
     validate_fisheye_directional_calibration,
 )
@@ -71,6 +71,19 @@ def _is_narrowband_filter(name: str | None) -> bool:
     return any(token in text for token in tokens)
 
 
+def _filter_uses_v_band_directly(name: str | None) -> bool | None:
+    text = (name or "").strip().casefold().replace("-", "_")
+    if not text:
+        return None
+    compatible = (
+        text in {"v", "v_bess", "v_bessel", "johnson_v", "bessell_v"}
+        or "johnson v" in text
+        or "bessell v" in text
+        or "bessel v" in text
+    )
+    return compatible
+
+
 def _target_scope_flags(target: dict[str, Any]) -> tuple[bool, bool]:
     """Return (unsupported, limited_validation) for the report-aligned model.
 
@@ -117,6 +130,42 @@ def _time_alignment(
         )
     return delta_min, notes
 
+
+def _location_alignment(
+    target: dict[str, Any],
+    metadata: ImageMetadata,
+    *,
+    tracking_site_latitude_deg: float | None = None,
+) -> list[str]:
+    """Reject a fixed/tracking camera solution used at the wrong observing site."""
+    notes: list[str] = []
+    target_lat = _finite(target.get("latitude"))
+    target_lon = _finite(target.get("longitude"))
+    extra = metadata.extra if isinstance(metadata.extra, dict) else {}
+    image_lat = _finite(extra.get("site_latitude_deg"))
+    image_lon = _finite(extra.get("site_longitude_deg"))
+    if target_lat is not None and tracking_site_latitude_deg is not None:
+        delta = abs(target_lat - tracking_site_latitude_deg)
+        if delta > 0.5:
+            raise ValueError(
+                f"Stellarium 위도와 고정식 전천 카메라 보정 관측소 위도가 {delta:.2f}° 다릅니다. "
+                "Stellarium 관측 위치 또는 전천 영상을 확인하세요."
+            )
+    if None not in (target_lat, target_lon, image_lat, image_lon):
+        assert target_lat is not None and target_lon is not None
+        assert image_lat is not None and image_lon is not None
+        latitude_delta = abs(target_lat - image_lat)
+        longitude_delta = abs((target_lon - image_lon + 180.0) % 360.0 - 180.0)
+        separation = math.hypot(latitude_delta, longitude_delta * math.cos(math.radians(target_lat)))
+        if separation > 1.0:
+            raise ValueError(
+                f"Stellarium 관측 위치와 전천 FITS 관측소가 약 {separation:.2f}° 다릅니다. "
+                "같은 관측 위치의 자료를 사용하세요."
+            )
+        if separation > 0.1:
+            notes.append(f"Stellarium과 전천 영상 관측 위치가 약 {separation:.2f}° 차이납니다.")
+    return notes
+
 def _allsky_profile_compatibility(
     profile: EquipmentProfile,
     metadata: ImageMetadata,
@@ -126,6 +175,21 @@ def _allsky_profile_compatibility(
     """Check whether a stored Csys is transferable to the current all-sky image."""
     incompatible: list[str] = []
     unknown: list[str] = []
+    if metadata.source_type == "rendered":
+        incompatible.append("현재 전천 영상이 렌더링 영상이라 저장된 절대 Csys의 선형 ADU 척도를 보장할 수 없습니다.")
+    reference_source_type = profile.reference_allsky_source_type
+    if reference_source_type and metadata.source_type:
+        if reference_source_type != metadata.source_type:
+            incompatible.append("현재 전천 영상과 Csys 기준 영상의 원본 형식/선형화 경로가 다릅니다.")
+    else:
+        unknown.append("Csys 기준 영상의 원본 형식 일치 여부를 확인하지 못했습니다.")
+
+    if profile.reference_allsky_dtype and metadata.dtype:
+        if profile.reference_allsky_dtype.strip().casefold() != metadata.dtype.strip().casefold():
+            unknown.append("현재 전천 영상과 Csys 기준 영상의 저장 dtype이 달라 ADU 척도 일치를 추가 확인해야 합니다.")
+    if profile.reference_allsky_bit_depth and metadata.bit_depth:
+        if int(profile.reference_allsky_bit_depth) != int(metadata.bit_depth):
+            incompatible.append("현재 전천 영상과 Csys 기준 영상의 bit depth가 다릅니다.")
     if profile.reference_allsky_camera and metadata.camera:
         if profile.reference_allsky_camera.strip().casefold() != metadata.camera.strip().casefold():
             incompatible.append("전천 카메라가 장비 프로필의 Csys 기준 카메라와 다릅니다.")
@@ -200,10 +264,16 @@ def _signal_model(
 ) -> tuple[float | None, float | None, str, list[str], dict[str, Any]]:
     warnings: list[str] = []
     narrowband = _is_narrowband_filter(profile.filter_name)
+    v_band_match = _filter_uses_v_band_directly(profile.filter_name)
     if narrowband:
         warnings.append(
             "장비 프로필의 필터가 협대역/다중대역으로 보입니다. Stellarium V등급은 해당 통과대역의 "
             "실제 광자율을 직접 나타내지 않으므로 대상 신호와 SNR은 계획용 근사로만 해석합니다."
+        )
+    elif v_band_match is False:
+        warnings.append(
+            f"장비 프로필 필터({profile.filter_name or '미상'})와 입력 천체등급(V)이 같은 대역이 아닙니다. "
+            "기준 천체와 대상의 색이 다르면 영점 전이가 달라질 수 있어 SNR을 계획용 근사로 표시합니다."
         )
     zero_point = profile.photometric_zero_point_mag
     if zero_point is None:
@@ -238,6 +308,9 @@ def _signal_model(
         "reference_airmass": reference_airmass,
         "extinction_factor": extinction_factor,
         "magnitude_source": magnitude_source,
+        "magnitude_band": "V",
+        "profile_filter": profile.filter_name or None,
+        "filter_v_band_match": v_band_match,
     }
     if mode == "point":
         if magnitude is None:
@@ -248,7 +321,12 @@ def _signal_model(
         n_pix = max(1, effective_pixels or profile.reference_aperture_pixels or 25)
         per_pixel = total_rate / n_pix
         diagnostics.update({"target_mag": magnitude, "total_signal_e_per_sec": total_rate, "n_pix": n_pix})
-        source_name = "catalog_magnitude_narrowband_approximation" if narrowband else "catalog_magnitude"
+        if narrowband:
+            source_name = "catalog_magnitude_narrowband_approximation"
+        elif v_band_match is False:
+            source_name = "catalog_magnitude_filter_mismatch_approximation"
+        else:
+            source_name = "catalog_magnitude"
         return float(total_rate), float(per_pixel), source_name, warnings, diagnostics
 
     # Extended targets are best modeled with surface brightness.  If the user supplies
@@ -264,7 +342,12 @@ def _signal_model(
             ], diagnostics
         area_arcsec2 = math.pi * (size_deg * 3600.0 / 2.0) ** 2
         mu = magnitude + 2.5 * math.log10(max(area_arcsec2, 1e-12))
-        source = "integrated_mag_plus_size_narrowband_approximation" if narrowband else "integrated_mag_plus_size"
+        if narrowband:
+            source = "integrated_mag_plus_size_narrowband_approximation"
+        elif v_band_match is False:
+            source = "integrated_mag_plus_size_filter_mismatch_approximation"
+        else:
+            source = "integrated_mag_plus_size"
         warnings.append(
             "확산천체는 카탈로그 통합등급과 원형 각크기로 평균 표면밝기를 근사했습니다. "
             "실제 구조·방출선·필터 특성 때문에 국소 SNR은 달라질 수 있습니다."
@@ -379,6 +462,18 @@ def _build_plan(
         warnings.append("장비 프로필에 센서 포화 ADU가 없어 포화 기반 상한을 적용하지 못했습니다.")
 
     limiting, practical_upper = min(upper_candidates, key=lambda item: item[1])
+    constraint_inputs = {
+        "target_snr": float(target_snr),
+        "min_sub_exposure_sec": float(min_sub_exposure_sec),
+        "max_sub_exposure_sec": float(max_sub_exposure_sec),
+        "tracking_limit_sec": float(tracking_limit_sec),
+        "background_limit_fraction": float(background_limit_fraction),
+        "saturation_safety_fraction": float(saturation_safety_fraction),
+        "stack_efficiency": float(stack_efficiency),
+        "max_frames": int(max_frames),
+        "frame_overhead_sec": float(frame_overhead_sec),
+        "effective_pixels": int(effective_pixels),
+    }
     if practical_upper < min_sub_exposure_sec:
         return {
             "status": "invalid",
@@ -394,25 +489,33 @@ def _build_plan(
             "target_saturation_upper_sec": target_saturation_upper,
             "practical_upper_sec": practical_upper,
             "limiting_constraint": limiting,
+            "selection_basis": "no_feasible_interval",
+            "constraint_status": "invalid",
+            "constraint_inputs": constraint_inputs,
             "confidence": "none",
             "warnings": warnings + ["안전 상한이 설정된 최소 단일노출보다 짧습니다."],
         }
 
-    # The report separates single-sub selection from the total-SNR target.  Choose a
-    # sub exposure that is read-noise efficient while retaining 15% headroom to the
-    # tightest practical upper bound.  Total SNR is then reached by stacking.
-    desired = min(practical_upper * 0.85, max(sky_lower, min_sub_exposure_sec))
-    if sky_lower > practical_upper:
-        desired = practical_upper * 0.85
+    # Safety fractions are already encoded in the physical upper bounds.  For a
+    # fixed total SNR, longer safe sub-exposures reduce read-noise and per-frame
+    # overhead, so choose the highest feasible upper bound.  The old min(lower,
+    # upper) expression could turn a user maximum of 110 s into 45 s and even
+    # round below the calculated 49 s read-noise-efficiency lower bound.
+    recommended = _safe_round_down(practical_upper, min_sub_exposure_sec)
+    if recommended < practical_upper * 0.95:
+        precision = 10.0 if practical_upper < 100.0 else 1.0
+        recommended = math.floor(practical_upper * precision) / precision
+    recommended = min(practical_upper, max(min_sub_exposure_sec, recommended))
+    sky_limited_feasible = sky_lower <= practical_upper
+    constraint_status = "sky_limited" if sky_limited_feasible else "upper_bound_compromise"
+    if not sky_limited_feasible:
         warnings.append("포화/추적 상한이 읽기잡음 효율 하한보다 짧아 포화 여유를 우선했습니다.")
-    recommended = min(
-        practical_upper,
-        _safe_round_down(max(desired, min_sub_exposure_sec), min_sub_exposure_sec),
-    )
-    recommended = max(min_sub_exposure_sec, recommended)
 
     snr_sub: float | None = None
     frames: int | None = None
+    required_frames_unbounded: int | None = None
+    max_frames_exceeded = False
+    achievable_snr_at_max_frames: float | None = None
     total: float | None = None
     elapsed: float | None = None
     if target_signal_rate_e is not None and target_signal_rate_e > 0:
@@ -425,10 +528,17 @@ def _build_plan(
             effective_pixels,
         )
         if snr_sub > 0:
-            frames = max(1, int(math.ceil((target_snr / max(snr_sub * stack_efficiency, 1e-12)) ** 2)))
-            if frames > max_frames:
+            required_frames_unbounded = max(
+                1,
+                int(math.ceil((target_snr / max(snr_sub * stack_efficiency, 1e-12)) ** 2)),
+            )
+            frames = required_frames_unbounded
+            achievable_snr_at_max_frames = snr_sub * stack_efficiency * math.sqrt(max_frames)
+            if required_frames_unbounded > max_frames:
+                max_frames_exceeded = True
                 warnings.append(
-                    f"목표 SNR에 필요한 프레임 수 {frames:,}장이 설정 한계 {max_frames:,}장을 초과합니다."
+                    f"목표 SNR에 필요한 프레임 수 {required_frames_unbounded:,}장이 설정 한계 {max_frames:,}장을 초과합니다. "
+                    f"최대 장수에서 예상 SNR은 약 {achievable_snr_at_max_frames:.1f}입니다."
                 )
                 frames = None
             else:
@@ -455,6 +565,9 @@ def _build_plan(
         "recommended_sub_exposure_sec": float(recommended),
         "predicted_snr_per_sub": None if snr_sub is None else float(snr_sub),
         "frames": frames,
+        "required_frames_unbounded": required_frames_unbounded,
+        "max_frames_exceeded": max_frames_exceeded,
+        "achievable_snr_at_max_frames": achievable_snr_at_max_frames,
         "total_integration_sec": None if total is None else float(total),
         "total_elapsed_sec": None if elapsed is None else float(elapsed),
         "sky_limited_lower_sec": float(sky_lower),
@@ -464,6 +577,10 @@ def _build_plan(
         "target_saturation_upper_sec": None if target_saturation_upper is None else float(target_saturation_upper),
         "practical_upper_sec": float(practical_upper),
         "limiting_constraint": limiting,
+        "selection_basis": "highest_safe_upper_bound",
+        "constraint_status": constraint_status,
+        "sky_limited_feasible": bool(sky_limited_feasible),
+        "constraint_inputs": constraint_inputs,
         "confidence": confidence,
         "warnings": warnings,
     }
@@ -533,8 +650,9 @@ def run_session_analysis(
         allsky_calibration,
         light_exposure_sec=exposure,
     )
-    if isinstance(allsky_cal_report.get("warnings"), list):
-        warnings.extend(str(item) for item in allsky_cal_report["warnings"])
+    allsky_cal_warnings = allsky_cal_report.get("warnings")
+    if isinstance(allsky_cal_warnings, list):
+        warnings.extend(str(item) for item in allsky_cal_warnings)
 
     fisheye = select_fisheye_config(
         project_root,
@@ -542,6 +660,14 @@ def run_session_analysis(
         filename=allsky_metadata.filename,
         width=allsky_metadata.width,
         height=allsky_metadata.height,
+        image=allsky_original.intensity,
+    )
+    warnings.extend(
+        _location_alignment(
+            target,
+            allsky_metadata,
+            tracking_site_latitude_deg=fisheye.tracking_site_latitude_deg,
+        )
     )
     allsky_offset_method = "unknown"
     allsky_offset_diagnostics: dict[str, Any] = {}
@@ -561,19 +687,17 @@ def run_session_analysis(
         current_allsky_offset = 0.0
         allsky_offset_known = False
         if not bool(allsky_cal_report.get("flat_frames")):
-            estimated_offset, offset_diag = estimate_apicam_masked_pedestal(
+            estimated_offset, offset_diag = estimate_masked_outer_field_pedestal(
                 allsky_original.intensity,
                 fisheye,
-                camera_name=allsky_metadata.camera,
-                filename=allsky_metadata.filename,
             )
             allsky_offset_diagnostics = offset_diag
             if estimated_offset is not None:
                 current_allsky_offset = float(estimated_offset)
                 allsky_offset_known = True
-                allsky_offset_method = "apicam_masked_outer_field"
+                allsky_offset_method = "masked_outer_field"
                 warnings.append(
-                    f"APICAM 전천영상의 180° 영상원 밖 비조명 영역에서 동일 프레임의 "
+                    f"전천영상의 원형 하늘 영역 밖에서 균일한 비조명 detector 영역을 확인해 동일 프레임의 "
                     f"bias+dark pedestal를 {current_allsky_offset:.1f} ADU로 추정했습니다."
                 )
         if not allsky_offset_known:
@@ -583,7 +707,7 @@ def run_session_analysis(
 
     sky_settings = AnalysisSettings(
         current_exposure_sec=1.0,
-        target_mode=target["target_mode"],  # type: ignore[arg-type]
+        target_mode=target["target_mode"],
         target_name=target["name"],
         target_alt_deg=float(target["alt_deg"]),
         target_az_deg=float(target["az_deg"]),
@@ -605,10 +729,21 @@ def run_session_analysis(
         flat_applied=bool(allsky_cal_report.get("flat_frames")),
     )
     warnings.extend(sky.notes)
-    if sky.target_background_adu is None:
+    directional_lookup_used = fisheye.orientation_confidence not in {"unknown", "low"}
+    if directional_lookup_used and sky.target_background_adu is None:
         raise ValueError("선택 천체 방향의 신뢰 가능한 전천 배경값을 계산하지 못했습니다.")
 
-    corrected_target_background = max(float(sky.target_background_adu) - current_allsky_offset, 0.0)
+    target_background_raw = (
+        float(sky.target_background_adu)
+        if directional_lookup_used and sky.target_background_adu is not None
+        else float(sky.sky_median_adu)
+    )
+    if not directional_lookup_used:
+        warnings.append(
+            "이 전천 카메라의 북쪽 방향 보정값을 확인하지 못해 임의 방향 셀을 사용하지 않고 "
+            "검증 가능한 전천 중앙 배경값으로 자동 대체했습니다. 카메라별 어안 보정 전까지 방향 지도는 진단용입니다."
+        )
+    corrected_target_background = max(target_background_raw - current_allsky_offset, 0.0)
     corrected_sky_median = max(float(sky.sky_median_adu) - current_allsky_offset, 0.0)
     if corrected_target_background <= 0 or corrected_sky_median <= 0:
         raise ValueError("Bias/offset 보정 후 전천 배경값이 0 이하입니다. 전천 offset과 보정 프레임을 확인하세요.")
@@ -621,6 +756,26 @@ def run_session_analysis(
         current_flat_applied=bool(allsky_cal_report.get("flat_frames")),
     )
     warnings.extend(bg_warnings)
+    background_uncertainty_fraction = 0.0
+    if directional_lookup_used and sky.target_uncertainty_adu is not None and target_background_raw > 0:
+        background_uncertainty_fraction = max(
+            background_uncertainty_fraction,
+            min(float(sky.target_uncertainty_adu) / target_background_raw, 1.0),
+        )
+    if bg_method == "c_sys_planning":
+        background_uncertainty_fraction = max(background_uncertainty_fraction, 0.15)
+    elif bg_method == "relative_fallback":
+        background_uncertainty_fraction = max(background_uncertainty_fraction, 0.30)
+    if not bool(allsky_cal_report.get("flat_frames")):
+        background_uncertainty_fraction = max(background_uncertainty_fraction, 0.15)
+    if not allsky_offset_known:
+        background_uncertainty_fraction = max(background_uncertainty_fraction, 0.10)
+    background_rate_for_plan = bg_rate_adu * (1.0 + background_uncertainty_fraction)
+    if background_uncertainty_fraction > 0:
+        warnings.append(
+            f"전천 보정과 배경 환산의 불확실성을 반영해 노출 계획에는 중앙 추정값보다 "
+            f"{background_uncertainty_fraction:.0%} 높은 보수적 배경률을 사용했습니다."
+        )
 
     # Airmass is a geometric observing-condition value and does not depend on
     # photometric zero-point availability. Store it explicitly for UI/JSON
@@ -644,7 +799,7 @@ def run_session_analysis(
     plan = _build_plan(
         profile=profile,
         target=target,
-        background_rate_adu_per_pix=bg_rate_adu,
+        background_rate_adu_per_pix=background_rate_for_plan,
         target_signal_rate_e=signal_rate,
         effective_pixels=n_pix,
         target_snr=target_snr,
@@ -664,7 +819,7 @@ def run_session_analysis(
     curve_max = max(curve_min * 10, min(max_sub_exposure_sec, max(plan.get("practical_upper_sec") or 0, 10.0)))
     xs = np.geomspace(curve_min, curve_max, 180)
     if signal_rate is not None and signal_rate > 0:
-        bg_e = bg_rate_adu * profile.gain_e_per_adu
+        bg_e = background_rate_for_plan * profile.gain_e_per_adu
         ys = np.array([
             _snr_for_exposure(x, signal_rate, bg_e, profile.dark_current_e_per_pix_sec, profile.read_noise_e, n_pix)
             for x in xs
@@ -696,7 +851,12 @@ def run_session_analysis(
     confidence = plan["confidence"]
     validity = "quantitative_candidate"
     validity_reasons: list[str] = []
-    if fisheye_errors:
+    if not directional_lookup_used:
+        validity = "planning_only"
+        validity_reasons.append(
+            "카메라별 북쪽 방향 보정이 없어 목표 방향을 추측하지 않고 전천 중앙 배경으로 자동 대체했습니다."
+        )
+    elif fisheye_errors:
         validity = "planning_only"
         validity_reasons.append("어안 보정 계수는 적용했지만 독립 각도 RMS 검증 자료가 없어 방향값을 관측 계획용으로 취급합니다.")
     if bg_method != "c_sys":
@@ -705,17 +865,18 @@ def run_session_analysis(
             validity_reasons.append("현재 전천 조건에 직접 적용 가능한 Csys가 없어 방향별 상대 배경 환산을 사용했습니다.")
         else:
             validity_reasons.append("Csys는 적용했지만 전천 장비 설정 일치 여부가 완전히 검증되지 않았습니다.")
-    approximate_signal = signal_source in {
-        "integrated_mag_plus_size",
-        "integrated_mag_plus_size_narrowband_approximation",
-        "catalog_magnitude_narrowband_approximation",
-    }
+    approximate_signal = (
+        signal_source.startswith("integrated_mag_plus_size")
+        or "approximation" in signal_source
+    )
     if signal_source == "unavailable" or approximate_signal:
         validity = "planning_only"
         if signal_source == "unavailable":
             validity_reasons.append("선택 천체의 절대 신호 모델이 없어 촬영 장수 계산이 제한됩니다.")
         elif "narrowband" in signal_source:
             validity_reasons.append("협대역/다중대역 필터에서 V등급 기반 신호 환산을 사용해 결과를 계획용 근사로 취급합니다.")
+        elif "filter_mismatch" in signal_source:
+            validity_reasons.append("장비 필터와 V등급 대역이 달라 색항을 알 수 없으므로 절대 신호를 계획용 근사로 취급합니다.")
         else:
             validity_reasons.append("확산천체 신호는 통합등급과 각크기로 평균 표면밝기를 근사했습니다.")
     if profile.zero_point_quality not in {"good"} and signal_source != "unavailable":
@@ -769,6 +930,8 @@ def run_session_analysis(
             "method": bg_method,
             "allsky_exposure_sec": exposure,
             "target_allsky_background_adu_raw": sky.target_background_adu,
+            "selected_background_adu_raw": target_background_raw,
+            "directional_lookup_used": directional_lookup_used,
             "allsky_median_adu_raw": sky.sky_median_adu,
             "allsky_offset_adu": current_allsky_offset,
             "allsky_offset_known": allsky_offset_known,
@@ -778,6 +941,9 @@ def run_session_analysis(
             "allsky_median_adu": corrected_sky_median,
             "telescope_background_adu_per_sec_per_pixel": bg_rate_adu,
             "telescope_background_e_per_sec_per_pixel": bg_rate_adu * profile.gain_e_per_adu,
+            "uncertainty_fraction_for_plan": background_uncertainty_fraction,
+            "planning_background_adu_per_sec_per_pixel": background_rate_for_plan,
+            "planning_background_e_per_sec_per_pixel": background_rate_for_plan * profile.gain_e_per_adu,
         },
         "target_signal_model": {
             "source": signal_source,
@@ -791,6 +957,7 @@ def run_session_analysis(
         "warnings": list(dict.fromkeys(warnings)),
         "diagnostics": {
             "fisheye_validation_errors": fisheye_errors,
+            "fisheye_selection": asdict(fisheye),
             "allsky_metadata": asdict(allsky_metadata),
             "allsky_calibration": allsky_cal_report,
             "observation_context": {

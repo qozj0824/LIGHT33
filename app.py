@@ -4,6 +4,7 @@ import asyncio
 import ctypes
 import gc
 import json
+import logging
 import math
 import os
 import re
@@ -24,7 +25,14 @@ from fastapi.staticfiles import StaticFiles
 from lightt import __version__
 from lightt.io import SUPPORTED_EXTENSIONS, infer_intensity_domain, load_image
 from lightt.models import AnalysisSettings, CalibrationSet
-from lightt.equipment import EquipmentProfile, create_equipment_profile, delete_profile, list_profiles, load_profile
+from lightt.equipment import (
+    EquipmentProfile,
+    create_equipment_profile,
+    delete_profile,
+    list_profiles,
+    load_profile,
+    validate_equipment_profile,
+)
 from lightt.session import run_session_analysis
 from lightt.photometry import propose_extended_rois
 from lightt.pipeline import run_analysis
@@ -34,6 +42,8 @@ from lightt.stellarium import ping as stellarium_ping_service
 from lightt.stellarium import set_simulation_time as stellarium_set_time_service
 from lightt.time_utils import image_observation_time_utc
 from lightt.visualization import save_scope_preview
+from lightt.geometry import select_fisheye_config
+from lightt.validation import assess_image_input
 
 ROOT = Path(__file__).resolve().parent
 UPLOAD_ROOT = ROOT / "uploads"
@@ -52,6 +62,7 @@ ANALYSIS_SEMAPHORE = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
 TOKEN_PATTERN = re.compile(r"^[a-f0-9]{24}$")
 SERVER_INSTANCE_ID = uuid.uuid4().hex[:12]
 SERVER_STARTED_AT = time.time()
+LOGGER = logging.getLogger("noxis")
 
 
 def _release_memory() -> None:
@@ -79,7 +90,7 @@ def _load_profile_or_snapshot(profile_id: str, profile_snapshot_json: str | None
             raw = json.loads(profile_snapshot_json)
             if not isinstance(raw, dict):
                 raise ValueError("프로필 백업 형식이 올바르지 않습니다.")
-            profile = EquipmentProfile.from_dict(raw)
+            profile = validate_equipment_profile(EquipmentProfile.from_dict(raw))
         except Exception as exc:
             raise ValueError("브라우저 장비 프로필 백업을 읽을 수 없습니다.") from exc
         if profile.profile_id != profile_id:
@@ -140,8 +151,10 @@ def stellarium_normalize(
     payload: Annotated[dict[str, object], Body()],
 ) -> dict[str, object]:
     """Normalize browser-fetched Stellarium data without proxying localhost through Render."""
-    status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
-    info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+    status_value = payload.get("status")
+    info_value = payload.get("info")
+    status: dict[object, object] = status_value if isinstance(status_value, dict) else {}
+    info: dict[object, object] = info_value if isinstance(info_value, dict) else {}
     if not info or "raw_text" in info:
         fallback = first_recursive(
             status,
@@ -376,6 +389,27 @@ async def inspect_image(
             "upload_token": token,
             "suggested_rois": suggested_rois,
         }
+        fisheye = None
+        if safe_role == "allsky":
+            fisheye = await run_in_threadpool(
+                select_fisheye_config,
+                ROOT,
+                camera_name=frame.metadata.camera,
+                filename=frame.metadata.filename,
+                width=frame.metadata.width,
+                height=frame.metadata.height,
+                image=frame.intensity,
+            )
+        assessment = await run_in_threadpool(
+            assess_image_input,
+            frame,
+            role=safe_role,
+            fisheye=fisheye,
+        )
+        response_payload["assessment"] = assessment
+        response_payload["warnings"] = list(dict.fromkeys(
+            inspect_warnings + list(assessment.get("warnings") or [])
+        ))
         # Drop the full-resolution detector array before returning to keep the small
         # Render instance from accumulating image memory between inspections.
         del frame
@@ -714,6 +748,15 @@ async def session_analyze(
     job_dir = UPLOAD_ROOT / request_id
     budget = UploadBudget(MAX_REQUEST_BYTES)
     try:
+        LOGGER.info(
+            "session_analysis_started request_id=%s profile_id=%s target=%r min_exposure=%s max_exposure=%s tracking_limit=%s",
+            request_id,
+            profile_id,
+            target_name[:120],
+            min_sub_exposure_sec,
+            max_sub_exposure_sec,
+            tracking_limit_sec,
+        )
         allsky_path = await _resolve_main_file(allsky, allsky_token, "allsky", job_dir, budget)
         allsky_cal = CalibrationSet(
             bias_paths=await _save_optional_uploads(allsky_bias, job_dir / "allsky_bias", "bias", budget),
@@ -767,13 +810,26 @@ async def session_analyze(
             result.setdefault("runtime", {})["profile_recovered_from_browser"] = True
             result.setdefault("warnings", []).append("Render 서버 재시작 후 브라우저에 저장된 장비 프로필을 자동 복구했습니다.")
         result.setdefault("runtime", {})["server_instance_id"] = SERVER_INSTANCE_ID
+        LOGGER.info(
+            "session_analysis_completed request_id=%s job_id=%s recommendation=%s practical_upper=%s validity=%s",
+            request_id,
+            result.get("job_id"),
+            result.get("plan", {}).get("recommended_sub_exposure_sec"),
+            result.get("plan", {}).get("practical_upper_sec"),
+            result.get("validity"),
+        )
         return JSONResponse(result)
     except HTTPException:
         raise
     except ValueError as exc:
+        LOGGER.warning("session_analysis_rejected request_id=%s reason=%s", request_id, str(exc))
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"관측 계획 분석 중 오류가 발생했습니다: {type(exc).__name__}") from exc
+        LOGGER.exception("session_analysis_failed request_id=%s", request_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"관측 계획 분석 중 오류가 발생했습니다: {type(exc).__name__} · 오류 ID {request_id[-12:]}",
+        ) from exc
     finally:
         shutil.rmtree(job_dir, ignore_errors=True)
         _release_memory()

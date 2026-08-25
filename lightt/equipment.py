@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from .geometry import (
-    estimate_apicam_masked_pedestal,
+    estimate_masked_outer_field_pedestal,
     select_fisheye_config,
     validate_fisheye_directional_calibration,
 )
@@ -24,7 +24,7 @@ from .sky import build_sky_map, prepare_sky_analysis_frame
 from .time_utils import image_observation_time_utc, observation_time_difference_minutes, parse_observation_datetime
 
 
-PROFILE_SCHEMA_VERSION = 5
+PROFILE_SCHEMA_VERSION = 6
 
 
 @dataclass(slots=True)
@@ -70,6 +70,9 @@ class EquipmentProfile:
     reference_allsky_exposure_sec: float | None = None
     reference_allsky_camera: str | None = None
     reference_allsky_gain_setting: float | None = None
+    reference_allsky_source_type: str | None = None
+    reference_allsky_dtype: str | None = None
+    reference_allsky_bit_depth: int | None = None
     reference_allsky_width: int | None = None
     reference_allsky_height: int | None = None
     reference_allsky_flat_applied: bool = False
@@ -86,7 +89,7 @@ class EquipmentProfile:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EquipmentProfile":
-        allowed = {field_.name for field_ in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        allowed = {field_.name for field_ in cls.__dataclass_fields__.values()}
         values = {key: value for key, value in raw.items() if key in allowed}
         return cls(**values)
 
@@ -99,6 +102,81 @@ def _finite_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def validate_equipment_profile(profile: EquipmentProfile) -> EquipmentProfile:
+    """Validate and safely migrate a stored/browser-restored profile."""
+    migration_warnings: list[str] = []
+    try:
+        stored_schema = int(profile.schema_version or 0)
+    except (TypeError, ValueError):
+        stored_schema = 0
+        migration_warnings.append("저장된 프로필 형식 번호가 손상되어 구형 프로필로 안전하게 복구했습니다.")
+    if stored_schema > PROFILE_SCHEMA_VERSION:
+        raise ValueError("이 장비 프로필은 현재 프로그램보다 새로운 형식입니다. 프로그램을 업데이트하세요.")
+    profile.schema_version = PROFILE_SCHEMA_VERSION
+
+    required_nonnegative = {
+        "read_noise_e": "읽기잡음",
+        "dark_current_e_per_pix_sec": "암전류",
+    }
+    gain = _finite_or_none(profile.gain_e_per_adu)
+    if gain is None or gain <= 0:
+        raise ValueError("장비 프로필의 Gain(e-/ADU)이 0보다 큰 유한값이 아닙니다.")
+    profile.gain_e_per_adu = gain
+    for field_name, label in required_nonnegative.items():
+        value = _finite_or_none(getattr(profile, field_name))
+        if value is None or value < 0:
+            raise ValueError(f"장비 프로필의 {label} 값이 올바르지 않습니다.")
+        setattr(profile, field_name, value)
+
+    bias = _finite_or_none(profile.bias_offset_adu)
+    profile.bias_offset_adu = 0.0 if bias is None else bias
+    optional_positive = (
+        "sensor_clip_adu",
+        "pixel_scale_arcsec",
+        "reference_background_adu_per_pix_sec",
+        "reference_peak_e_per_sec",
+        "reference_psf_peak_fraction",
+        "photometric_zero_point_mag",
+        "c_sys",
+    )
+    for field_name in optional_positive:
+        raw_value = getattr(profile, field_name)
+        value = _finite_or_none(raw_value)
+        if field_name == "photometric_zero_point_mag":
+            setattr(profile, field_name, value)
+        elif value is None or value <= 0:
+            if raw_value not in (None, ""):
+                migration_warnings.append(f"저장된 {field_name} 값이 유효하지 않아 자동 비활성화했습니다.")
+            setattr(profile, field_name, None)
+        else:
+            setattr(profile, field_name, value)
+    extinction = _finite_or_none(profile.extinction_k_mag_per_airmass)
+    if extinction is None or not 0.0 <= extinction <= 5.0:
+        profile.extinction_k_mag_per_airmass = 0.20
+        migration_warnings.append("저장된 대기소광계수가 유효 범위 밖이라 계획용 기본값 0.20으로 복구했습니다.")
+    else:
+        profile.extinction_k_mag_per_airmass = extinction
+    if profile.reference_psf_peak_fraction is not None and profile.reference_psf_peak_fraction > 1.0:
+        profile.reference_psf_peak_fraction = None
+        migration_warnings.append("PSF peak 비율이 1을 초과해 대상 포화 계산에서 자동 제외했습니다.")
+    if profile.sensor_clip_adu is not None and profile.sensor_clip_adu <= profile.bias_offset_adu:
+        profile.sensor_clip_adu = None
+        migration_warnings.append("센서 포화 ADU가 Bias/offset 이하라 포화 상한을 자동 비활성화했습니다.")
+    if profile.c_sys is None:
+        profile.c_sys_quality = "unavailable"
+    if profile.photometric_zero_point_mag is None:
+        profile.zero_point_quality = "unavailable"
+    if profile.reference_target_mode not in {"point", "extended"}:
+        profile.reference_target_mode = "extended"
+        migration_warnings.append("알 수 없는 기준 천체 유형을 확산천체로 안전하게 변경했습니다.")
+    if profile.confidence not in {"high", "medium", "low"}:
+        profile.confidence = "low"
+    if not isinstance(profile.warnings, list):
+        profile.warnings = []
+    profile.warnings = list(dict.fromkeys([str(item) for item in profile.warnings] + migration_warnings))
+    return profile
 
 
 def _effective_detector_offset(frame: Any, calibration_report: dict[str, Any], fallback: float | None = None) -> tuple[float, bool]:
@@ -146,7 +224,7 @@ def list_profiles(root: Path) -> list[EquipmentProfile]:
     for path in sorted(root.glob("*/profile.json")):
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            profiles.append(EquipmentProfile.from_dict(raw))
+            profiles.append(validate_equipment_profile(EquipmentProfile.from_dict(raw)))
         except Exception:
             continue
     profiles.sort(key=lambda item: item.created_at, reverse=True)
@@ -160,7 +238,7 @@ def load_profile(root: Path, profile_id: str) -> EquipmentProfile:
     if not path.exists():
         raise ValueError("장비 프로필을 찾을 수 없습니다.")
     raw = json.loads(path.read_text(encoding="utf-8"))
-    return EquipmentProfile.from_dict(raw)
+    return validate_equipment_profile(EquipmentProfile.from_dict(raw))
 
 
 def save_profile(root: Path, profile: EquipmentProfile) -> Path:
@@ -250,6 +328,7 @@ def _prepare_reference_target_for_capture(
             from astropy.coordinates import AltAz, EarthLocation, SkyCoord
             from astropy.time import Time
 
+            assert ra is not None and dec is not None and lat is not None and lon is not None
             location = EarthLocation(
                 lat=float(lat) * u.deg,
                 lon=float(lon) * u.deg,
@@ -367,8 +446,9 @@ def create_equipment_profile(
             scope_calibration,
             light_exposure_sec=resolved_exposure,
         )
-        if isinstance(scope_cal_report.get("warnings"), list):
-            warnings.extend(str(item) for item in scope_cal_report["warnings"])
+        scope_cal_warnings = scope_cal_report.get("warnings")
+        if isinstance(scope_cal_warnings, list):
+            warnings.extend(str(item) for item in scope_cal_warnings)
 
         effective_scope_bias, scope_offset_known = _effective_detector_offset(
             scope_original, scope_cal_report, bias_offset_adu
@@ -528,6 +608,9 @@ def create_equipment_profile(
         ref_allsky_exposure_value: float | None = None
         ref_allsky_camera: str | None = None
         ref_allsky_gain: float | None = None
+        ref_allsky_source_type: str | None = None
+        ref_allsky_dtype: str | None = None
+        ref_allsky_bit_depth: int | None = None
         ref_allsky_width: int | None = None
         ref_allsky_height: int | None = None
         ref_allsky_flat_applied = False
@@ -551,6 +634,9 @@ def create_equipment_profile(
                 )
             ref_allsky_camera = allsky_original.metadata.camera
             ref_allsky_gain = allsky_original.metadata.gain_setting
+            ref_allsky_source_type = allsky_original.metadata.source_type
+            ref_allsky_dtype = allsky_original.metadata.dtype
+            ref_allsky_bit_depth = allsky_original.metadata.bit_depth
             ref_allsky_width = allsky_original.metadata.width
             ref_allsky_height = allsky_original.metadata.height
             allsky_exposure = reference_allsky_exposure_sec or allsky_original.metadata.exposure_sec
@@ -575,24 +661,31 @@ def create_equipment_profile(
                     filename=allsky_original.metadata.filename,
                     width=allsky_original.metadata.width,
                     height=allsky_original.metadata.height,
+                    image=allsky_original.intensity,
                 )
+                target_latitude = _finite_or_none(target.get("latitude"))
+                if target_latitude is not None and fisheye.tracking_site_latitude_deg is not None:
+                    site_delta = abs(target_latitude - fisheye.tracking_site_latitude_deg)
+                    if site_delta > 0.5:
+                        raise ValueError(
+                            f"기준 천체의 Stellarium 위도와 고정식 전천 카메라 보정 관측소 위도가 "
+                            f"{site_delta:.2f}° 다릅니다. 관측 위치를 확인하세요."
+                        )
                 allsky_offset, allsky_offset_known = _effective_detector_offset(allsky_original, allsky_cal_report)
                 allsky_offset_method = "calibration_or_header" if allsky_offset_known else "unknown"
                 allsky_offset_diagnostics: dict[str, Any] = {}
                 if not allsky_offset_known and not bool(allsky_cal_report.get("flat_frames")):
-                    estimated_offset, offset_diag = estimate_apicam_masked_pedestal(
+                    estimated_offset, offset_diag = estimate_masked_outer_field_pedestal(
                         allsky_original.intensity,
                         fisheye,
-                        camera_name=allsky_original.metadata.camera,
-                        filename=allsky_original.metadata.filename,
                     )
                     allsky_offset_diagnostics = offset_diag
                     if estimated_offset is not None:
                         allsky_offset = float(estimated_offset)
                         allsky_offset_known = True
-                        allsky_offset_method = "apicam_masked_outer_field"
+                        allsky_offset_method = "masked_outer_field"
                         warnings.append(
-                            f"APICAM 전천영상의 180° 영상원 밖 비조명 영역에서 동일 프레임의 "
+                            f"전천영상의 원형 하늘 영역 밖에서 균일한 비조명 detector 영역을 확인해 동일 프레임의 "
                             f"bias+dark pedestal를 {allsky_offset:.1f} ADU로 추정했습니다. "
                             "별도 Bias가 없을 때 사용하는 프레임별 보정입니다."
                         )
@@ -630,8 +723,19 @@ def create_equipment_profile(
                     map_dir,
                     flat_applied=bool(allsky_cal_report.get("flat_frames")),
                 )
-                if sky.target_background_adu is not None:
-                    allsky_rate = max(sky.target_background_adu - allsky_offset, 0.0) / allsky_exposure
+                directional_lookup_used = fisheye.orientation_confidence not in {"unknown", "low"}
+                selected_sky_background = (
+                    sky.target_background_adu
+                    if directional_lookup_used and sky.target_background_adu is not None
+                    else sky.sky_median_adu
+                )
+                if not directional_lookup_used:
+                    warnings.append(
+                        "기준 전천 카메라의 북쪽 방향 보정값이 없어 기준 천체 방향 대신 전천 중앙 배경으로 "
+                        "Csys를 계산했습니다. 이 Csys는 방향 독립 계획값입니다."
+                    )
+                if selected_sky_background is not None:
+                    allsky_rate = max(selected_sky_background - allsky_offset, 0.0) / allsky_exposure
                     if allsky_rate > 0 and bg_adu_per_pix_sec > 0:
                         c_sys = float(bg_adu_per_pix_sec / allsky_rate)
                         quantitative_sources = (
@@ -652,6 +756,8 @@ def create_equipment_profile(
                 c_sys_diagnostics = {
                     "fisheye_validation_errors": fisheye_errors,
                     "sky_target_background_adu": sky.target_background_adu,
+                    "selected_sky_background_adu": selected_sky_background,
+                    "directional_lookup_used": directional_lookup_used,
                     "sky_target_relative_factor": sky.target_relative_factor,
                     "allsky_exposure_sec": allsky_exposure,
                     "allsky_offset_adu": allsky_offset if 'allsky_offset' in locals() else None,
@@ -659,6 +765,7 @@ def create_equipment_profile(
                     "allsky_offset_method": allsky_offset_method if 'allsky_offset_method' in locals() else "unknown",
                     "allsky_offset_diagnostics": allsky_offset_diagnostics if 'allsky_offset_diagnostics' in locals() else {},
                     "paired_frame_time_difference_min": paired_epoch_delta_min,
+                    "fisheye_selection": asdict(fisheye),
                 }
 
         confidence = "high"
@@ -716,6 +823,9 @@ def create_equipment_profile(
             reference_allsky_exposure_sec=ref_allsky_exposure_value,
             reference_allsky_camera=ref_allsky_camera,
             reference_allsky_gain_setting=ref_allsky_gain,
+            reference_allsky_source_type=ref_allsky_source_type,
+            reference_allsky_dtype=ref_allsky_dtype,
+            reference_allsky_bit_depth=ref_allsky_bit_depth,
             reference_allsky_width=ref_allsky_width,
             reference_allsky_height=ref_allsky_height,
             reference_allsky_flat_applied=ref_allsky_flat_applied,

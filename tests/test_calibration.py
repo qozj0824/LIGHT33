@@ -4,10 +4,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-fits = pytest.importorskip("astropy.io.fits")
 
 from lightt.io import apply_calibration
 from lightt.models import CalibrationSet, ImageFrame, ImageMetadata
+
+fits = pytest.importorskip("astropy.io.fits")
 
 
 def make_frame(data: np.ndarray, exposure: float = 10.0) -> ImageFrame:

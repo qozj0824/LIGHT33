@@ -101,6 +101,13 @@ class FisheyeConfig:
     validation_basis: str | None = None
     calibration_date: str | None = None
     camera_lens_id: str | None = None
+    # Runtime provenance for automatic camera-model selection.  These fields are
+    # deliberately optional so older JSON calibration files and saved profiles
+    # remain compatible.
+    selection_source: str = "unspecified"
+    geometry_confidence: str = "low"
+    orientation_confidence: str = "low"
+    geometry_diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

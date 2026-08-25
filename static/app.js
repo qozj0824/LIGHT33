@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   allskyToken: null,
   allskyMetadata: null,
+  allskyAssessment: null,
   target: null,
   referenceTarget: null,
   profiles: [],
@@ -54,6 +55,24 @@ function formatSeconds(value) {
   if (seconds < 60) return `${formatNumber(seconds, seconds < 10 ? 1 : 0)}초`;
   if (seconds < 3600) return `${formatNumber(seconds / 60, 1)}분`;
   return `${formatNumber(seconds / 3600, 2)}시간`;
+}
+
+function assessmentLabel(assessment) {
+  return {
+    ready: "자동 판정 완료",
+    usable_with_fallbacks: "자동 보정 적용",
+    needs_input: "추가 입력 필요",
+  }[assessment?.status] || "";
+}
+
+function assessmentSummary(assessment) {
+  if (!assessment) return "";
+  const items = [
+    ...(assessment.required_actions || []),
+    ...(assessment.automatic_recoveries || []),
+    ...(assessment.warnings || []),
+  ];
+  return items.length ? items.slice(0, 3).join(" · ") : "";
 }
 
 function escapeText(value) { return String(value ?? ""); }
@@ -263,6 +282,7 @@ async function inspectAllsky(file) {
   state.allskyInspectController = new AbortController();
   state.allskyToken = null;
   state.allskyMetadata = null;
+  state.allskyAssessment = null;
   showLocalPreview(file, "allskyPreview", "main-allsky", "allskyPreviewPlaceholder");
   if (!file) {
     $("allskyName").textContent = "선택 안 됨";
@@ -286,9 +306,11 @@ async function inspectAllsky(file) {
     if (!response.ok) throw new Error(payload.detail || "전천 영상 읽기 실패");
     state.allskyToken = payload.upload_token || null;
     state.allskyMetadata = payload.metadata || null;
+    state.allskyAssessment = payload.assessment || null;
     showServerPreview(payload.preview_url, "allskyPreview", "allskyPreviewPlaceholder");
-    $("allskyPreviewStatus").textContent = "";
-    $("allskyMetadata").textContent = renderMetadata(payload.metadata);
+    $("allskyPreviewStatus").textContent = assessmentLabel(payload.assessment);
+    const assessmentText = assessmentSummary(payload.assessment);
+    $("allskyMetadata").textContent = [renderMetadata(payload.metadata), assessmentText].filter(Boolean).join(" · ");
     if (payload.metadata?.exposure_sec && $("allskyExposure").value === "") {
       $("allskyExposure").placeholder = `헤더: ${payload.metadata.exposure_sec}s`;
     }
@@ -354,8 +376,11 @@ async function inspectReferenceScope(file) {
     state.referenceScopeMetadata = payload.metadata;
     state.referenceScopeCaptureTimeUtc = payload.capture_time_utc || null;
     showServerPreview(payload.preview_url, "profileScopePreview", "profileScopePreviewPlaceholder");
-    $("profileScopePreviewStatus").textContent = payload.preview_warning ? "미리보기 제한" : "";
-    $("profileScopeMetadata").textContent = formatCaptureMetadata(payload.metadata, payload.capture_time_utc);
+    $("profileScopePreviewStatus").textContent = payload.preview_warning ? "미리보기 제한" : assessmentLabel(payload.assessment);
+    $("profileScopeMetadata").textContent = [
+      formatCaptureMetadata(payload.metadata, payload.capture_time_utc),
+      assessmentSummary(payload.assessment),
+    ].filter(Boolean).join(" · ");
     $("setStellariumReferenceTime").disabled = !payload.capture_time_utc;
     if (payload.metadata?.exposure_sec && $("profileScopeExposure").value === "") {
       $("profileScopeExposure").placeholder = `헤더: ${payload.metadata.exposure_sec}s`;
@@ -399,8 +424,11 @@ async function inspectReferenceAllsky(file) {
     if (!response.ok) throw new Error(payload.detail || "전천 기준 영상 확인 실패");
     state.referenceAllskyMetadata = payload.metadata || null;
     showServerPreview(payload.preview_url, "profileAllskyPreview", "profileAllskyPreviewPlaceholder");
-    $("profileAllskyPreviewStatus").textContent = payload.preview_warning ? "미리보기 제한" : "";
-    $("profileAllskyMetadata").textContent = renderMetadata(payload.metadata);
+    $("profileAllskyPreviewStatus").textContent = payload.preview_warning ? "미리보기 제한" : assessmentLabel(payload.assessment);
+    $("profileAllskyMetadata").textContent = [
+      renderMetadata(payload.metadata),
+      assessmentSummary(payload.assessment),
+    ].filter(Boolean).join(" · ");
     if (payload.metadata?.exposure_sec && $("profileAllskyExposure").value === "") {
       $("profileAllskyExposure").placeholder = `헤더: ${payload.metadata.exposure_sec}s`;
     }
@@ -763,10 +791,13 @@ function renderSelectedProfile() {
 function updateReadyState() {
   const hasAllsky = Boolean(state.allskyToken || $("allsky")?.files?.[0]);
   const hasProfile = Boolean($("equipmentProfile").value);
+  const hasAllskyExposure = Boolean(
+    Number(state.allskyMetadata?.exposure_sec) > 0 || Number(valueOrNull("allskyExposure")) > 0
+  );
   const targetKnown = Boolean(state.target && Number.isFinite(Number(state.target.alt_deg)));
   const targetGood = targetKnown && Number(state.target.alt_deg) >= Number($("minimumSkyAltitude").value || 15);
   const targetFresh = Boolean(state.stellariumFresh);
-  const ready = Boolean(hasAllsky && hasProfile && targetGood && targetFresh && !state.analyzing);
+  const ready = Boolean(hasAllsky && hasAllskyExposure && hasProfile && targetGood && targetFresh && !state.analyzing);
   const button = $("analyzeButton");
   button.disabled = !ready;
 
@@ -776,6 +807,9 @@ function updateReadyState() {
   } else if (!hasAllsky) {
     button.textContent = "전천 영상을 선택하세요";
     $("readyStatus").textContent = "";
+  } else if (!hasAllskyExposure) {
+    button.textContent = "전천 노출시간을 입력하세요";
+    $("readyStatus").textContent = "영상 헤더에서 노출시간을 읽지 못했습니다.";
   } else if (!hasProfile) {
     button.textContent = "장비 프로필을 선택하세요";
     $("readyStatus").textContent = "";
@@ -959,7 +993,9 @@ function renderResult(result) {
   $("confidenceBox").textContent = `신뢰도 ${confidenceLabel(result.confidence)} · ${validityLabel(result.validity)}`;
   $("mSub").textContent = plan.recommended_sub_exposure_sec == null ? "확정 불가" : formatSeconds(plan.recommended_sub_exposure_sec);
   $("mSnr").textContent = formatNumber(plan.predicted_snr_per_sub, 2);
-  $("mFrames").textContent = plan.frames == null ? "—" : `${formatNumber(plan.frames, 0)}장`;
+  $("mFrames").textContent = plan.frames == null
+    ? (plan.max_frames_exceeded ? `필요 ${formatNumber(plan.required_frames_unbounded, 0)}장` : "—")
+    : `${formatNumber(plan.frames, 0)}장`;
   $("mTotal").textContent = formatSeconds(plan.total_integration_sec);
   $("mAltitude").textContent = `${formatNumber(result.target?.alt_deg, 2)}°`;
   $("mAirmass").textContent = result.target?.airmass == null ? "—" : formatNumber(result.target.airmass, 5);
@@ -1037,6 +1073,7 @@ function wireEvents() {
   $("profileScopeFile").addEventListener("change", () => inspectReferenceScope($("profileScopeFile").files[0]));
   $("profileAllskyFile").addEventListener("change", () => inspectReferenceAllsky($("profileAllskyFile").files[0]));
   $("allsky").addEventListener("change", () => inspectAllsky($("allsky").files[0]));
+  $("allskyExposure").addEventListener("input", updateReadyState);
   $("stellariumPing").addEventListener("click", stellariumPing);
   $("stellariumPingDaily").addEventListener("click", stellariumPing);
   $("importReferenceTarget").addEventListener("click", () => importStellariumTarget(true));

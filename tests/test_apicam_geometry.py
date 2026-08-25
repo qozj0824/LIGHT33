@@ -45,7 +45,9 @@ def test_non_apicam_square_frame_does_not_get_apicam_calibration() -> None:
         width=4096,
         height=4096,
     )
-    assert config.mode == "calibrated_kannala_brandt"
+    assert config.mode == "auto_equidistant"
+    assert config.orientation_confidence == "unknown"
+    assert config.selection_source == "centered_fallback"
 
 
 def test_apicam_known_bright_star_directions_are_recovered() -> None:
