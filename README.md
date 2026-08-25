@@ -1,6 +1,8 @@
 # NØXIS
 
-> **v36.0 data-independent robustness:** The session planner now honors the actual single-exposure upper bound (including the 110 s regression case), records all received constraints and selection reasons, and applies a conservative background uncertainty margin. Unknown all-sky cameras no longer inherit the bundled Canon calibration. NØXIS detects a circular footprint only when supported by image evidence, estimates an outer-field pedestal only after uniformity/contrast checks, falls back to the all-sky median when north orientation is unknown, adapts the sky grid to small inputs, validates saved profiles and observing locations, and emits traceable Render log IDs for unexpected failures.
+> **v36.1 balanced exposure selection:** The maximum single exposure is now treated strictly as a cap, not as the requested recommendation. NØXIS selects the shortest camera-friendly exposure that reaches 90% of the asymptotic read-noise/overhead efficiency, then applies background, tracking, target-saturation and reference-field advisory checks. The uploaded FORS2/APICAM result that incorrectly selected 600 s now selects 100 s.
+
+> **v36.0 data-independent robustness:** Unknown all-sky cameras no longer inherit the bundled Canon calibration. NØXIS detects a circular footprint only when supported by image evidence, estimates an outer-field pedestal only after uniformity/contrast checks, falls back to the all-sky median when north orientation is unknown, adapts the sky grid to small inputs, validates saved profiles and observing locations, and emits traceable Render log IDs for unexpected failures.
 
 > **v35.10 APICAM tracking geometry:** ESO documents APICAM-3 as mounted on a tracking station. NØXIS now treats the calibrated APICAM rotation as a reference-epoch solution and uses the FITS `LST` to transform detector rays to the local azimuth/altitude of each observation. Four independent archive frames confirmed detector tracking stability (< 2.94 px maximum drift for the 10-star validation subset). This is a temporal tracking validation, not yet an independent absolute astrometric hold-out, so Csys direction quality remains `planning`.
 
@@ -8,14 +10,14 @@
 > **v35.9 APICAM pedestal:** If an ESO APICAM FITS has no explicit Bias/offset calibration, NØXIS can estimate the same-frame bias+dark pedestal from the optically dark detector area outside the calibrated 180° image circle. The method is APICAM-specific, provenance is saved in JSON, and directional Csys quality remains planning until independent fisheye hold-out validation.
 > **v35.8 Render memory fix:** 4k-class all-sky FITS frames (including ESO APICAM/ALPACA) are now reduced to an 600-pixel analysis grid before coordinate transforms and star masking. The final 72×18 sky grid remains strongly oversampled, while peak RAM during equipment-profile creation is substantially lower.
 
- v36.0
+ v36.1
 
 > **v35.6 APICAM support:** ESO APICAM FITS files now use a camera-specific 4096×4096 mirrored fisheye directional model instead of the Canon EOS R/Sigma 8 mm calibration. The bundled APICAM solution is intentionally planning-grade until independent hold-out/external validation is completed.
 
 
 **방향별 하늘 배경과 저장된 장비 프로필을 이용한 천체 촬영 계획 프로그램**
 
-NØXIS v36.0은 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화·스택 계산 원리를 하나의 로컬 웹 프로그램으로 연결한 배포본입니다.
+NØXIS v36.1은 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화·스택 계산 원리를 하나의 로컬 웹 프로그램으로 연결한 배포본입니다.
 
 ## v34.2 핵심 수정
 
@@ -110,7 +112,7 @@ JPG/PNG/TIFF는 미리보기·진단에 사용할 수 있으나 카메라 내부
 - 방향별 하늘 배경
 - 결과 신뢰도와 제한 사유
 
-목표 SNR은 단일 노출을 무조건 늘리는 값으로 사용하지 않습니다. 단일 노출은 read-noise 효율과 포화·배경·추적 상한을 고려해 정하고, 목표 SNR은 주로 촬영 장수와 총 적분시간에 반영합니다.
+목표 SNR은 단일 노출을 무조건 늘리는 값으로 사용하지 않습니다. 단일 노출은 read-noise와 프레임 오버헤드를 합친 90% 효율 목표에 처음 도달하는 값을 기준으로 포화·배경·추적 상한을 적용하고, 목표 SNR은 주로 촬영 장수와 총 적분시간에 반영합니다. `최대 단일노출`은 추천을 그 값까지 늘리라는 뜻이 아니라 넘지 말아야 할 상한입니다.
 
 ## 과학적 범위
 

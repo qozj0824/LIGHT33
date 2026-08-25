@@ -811,11 +811,12 @@ async def session_analyze(
             result.setdefault("warnings", []).append("Render 서버 재시작 후 브라우저에 저장된 장비 프로필을 자동 복구했습니다.")
         result.setdefault("runtime", {})["server_instance_id"] = SERVER_INSTANCE_ID
         LOGGER.info(
-            "session_analysis_completed request_id=%s job_id=%s recommendation=%s practical_upper=%s validity=%s",
+            "session_analysis_completed request_id=%s job_id=%s recommendation=%s practical_upper=%s selection_basis=%s validity=%s",
             request_id,
             result.get("job_id"),
             result.get("plan", {}).get("recommended_sub_exposure_sec"),
             result.get("plan", {}).get("practical_upper_sec"),
+            result.get("plan", {}).get("selection_basis"),
             result.get("validity"),
         )
         return JSONResponse(result)

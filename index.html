@@ -130,7 +130,7 @@
           <div class="grid compact-grid three">
             <label>목표 SNR<input id="targetSnr" type="number" value="100" min="0.1" max="10000" step="1"></label>
             <label>최소 단일노출 (초)<input id="minExposure" type="number" value="1" min="0.001" step="0.1"></label>
-            <label>최대 단일노출 (초)<input id="maxExposure" type="number" value="600" min="0.01" step="1"></label>
+            <label title="추천값이 아니라 절대로 넘지 않을 상한입니다.">최대 단일노출 상한 (초)<input id="maxExposure" type="number" value="600" min="0.01" step="1"></label>
             <label>추적 한계 (초)<input id="trackingLimit" type="number" value="0" min="0" step="1"></label>
             <label>프레임 오버헤드 (초)<input id="frameOverhead" type="number" value="2" min="0" step="0.1"></label>
             <label>포화 안전비율<input id="saturationSafety" type="number" value="0.80" min="0.05" max="0.99" step="0.01"></label>

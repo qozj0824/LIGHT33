@@ -146,7 +146,7 @@ def test_target_snr_changes_frames_not_single_exposure_when_constraints_same():
     assert high["frames"] > low["frames"]
 
 
-def test_session_plan_honors_110_second_user_max_above_sky_lower():
+def test_session_plan_uses_efficiency_target_without_exceeding_110_second_cap():
     p = profile(
         gain_e_per_adu=1.25,
         read_noise_e=2.7,
@@ -172,12 +172,13 @@ def test_session_plan_honors_110_second_user_max_above_sky_lower():
     assert 48.0 < result["sky_limited_lower_sec"] < 50.0
     assert result["recommended_sub_exposure_sec"] == 110.0
     assert result["practical_upper_sec"] == 110.0
-    assert result["limiting_constraint"] == "user_max"
+    assert result["limiting_constraint"] == "exposure_efficiency_target"
+    assert result["hard_upper_constraint"] == "user_max"
     assert result["constraint_inputs"]["max_sub_exposure_sec"] == 110.0
-    assert result["constraint_status"] == "sky_limited"
+    assert result["constraint_status"] == "efficiency_balanced"
 
 
-def test_session_plan_changes_when_user_max_changes():
+def test_user_max_is_a_cap_not_the_requested_recommendation():
     p = profile(reference_peak_e_per_sec=None)
     common = dict(
         profile=p,
@@ -196,8 +197,66 @@ def test_session_plan_changes_when_user_max_changes():
     )
     short = _build_plan(max_sub_exposure_sec=110.0, **common)
     long = _build_plan(max_sub_exposure_sec=600.0, **common)
-    assert short["recommended_sub_exposure_sec"] == 110.0
-    assert long["recommended_sub_exposure_sec"] == 600.0
+    assert short["recommended_sub_exposure_sec"] == long["recommended_sub_exposure_sec"]
+    assert 90.0 <= short["recommended_sub_exposure_sec"] <= 110.0
+    assert short["selection_basis"] == "efficiency_target"
+    assert long["selection_basis"] == "efficiency_target"
+
+
+def test_result7_fors2_600_second_cap_balances_at_100_seconds():
+    p = profile(
+        gain_e_per_adu=1.25,
+        read_noise_e=2.7,
+        dark_current_e_per_pix_sec=0.0,
+        reference_peak_e_per_sec=521.6843756931794,
+    )
+    result = _build_plan(
+        profile=p,
+        target={"target_mode": "extended"},
+        background_rate_adu_per_pix=0.6842575193503907,
+        target_signal_rate_e=11.030948845718818,
+        effective_pixels=100,
+        target_snr=150.0,
+        min_sub_exposure_sec=1.0,
+        max_sub_exposure_sec=600.0,
+        tracking_limit_sec=0.0,
+        background_limit_fraction=0.30,
+        saturation_safety_fraction=0.80,
+        stack_efficiency=0.90,
+        max_frames=2000,
+        frame_overhead_sec=2.0,
+    )
+    assert result["recommended_sub_exposure_sec"] == 100.0
+    assert 96.0 < result["exposure_efficiency_lower_sec"] < 97.0
+    assert result["exposure_efficiency_at_recommendation"] >= 0.90
+    assert 125.0 < result["reference_star_saturation_diagnostic_sec"] < 126.0
+    assert result["practical_upper_sec"] == 600.0
+    assert result["selection_basis"] == "efficiency_target"
+    assert result["limiting_constraint"] == "exposure_efficiency_target"
+
+
+def test_friendly_rounding_never_crosses_reference_star_advisory():
+    p = profile(reference_peak_e_per_sec=523.5)
+    result = _build_plan(
+        profile=p,
+        target={"target_mode": "extended"},
+        background_rate_adu_per_pix=1.0,
+        target_signal_rate_e=30.0,
+        effective_pixels=100,
+        target_snr=100.0,
+        min_sub_exposure_sec=1.0,
+        max_sub_exposure_sec=600.0,
+        tracking_limit_sec=0.0,
+        background_limit_fraction=0.30,
+        saturation_safety_fraction=0.80,
+        stack_efficiency=0.90,
+        max_frames=100000,
+        frame_overhead_sec=2.0,
+    )
+    assert result["exposure_efficiency_lower_sec"] < result["reference_star_saturation_diagnostic_sec"]
+    assert result["recommended_sub_exposure_sec"] <= result["reference_star_saturation_diagnostic_sec"]
+    assert result["recommended_sub_exposure_sec"] == 95.0
+    assert result["reference_star_advisory_applied"] is True
 
 
 def test_session_plan_reports_read_noise_compromise_without_crashing():
@@ -256,7 +315,8 @@ def test_point_target_saturation_uses_psf_peak_fraction():
         max_frames=100000, frame_overhead_sec=2.0,
     )
     assert result["target_saturation_upper_sec"] is not None
-    assert result["limiting_constraint"] in {"target_saturation", "background", "user_max"}
+    assert result["hard_upper_constraint"] in {"target_saturation", "background", "user_max"}
+    assert result["recommended_sub_exposure_sec"] <= result["target_saturation_upper_sec"]
 
 
 def test_equipment_profile_persists_reference_image(tmp_path):

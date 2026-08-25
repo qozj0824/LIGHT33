@@ -390,6 +390,72 @@ def _snr_for_exposure(
     return signal / math.sqrt(variance) if variance > 0 else 0.0
 
 
+def _exposure_efficiency_time(
+    *,
+    background_rate_e_per_pix: float,
+    dark_current_e_per_pix_sec: float,
+    read_noise_e: float,
+    frame_overhead_sec: float,
+    target_efficiency: float = 0.90,
+) -> tuple[float, float]:
+    """Return the shortest exposure meeting a read-noise/overhead efficiency target.
+
+    Relative to an infinitely long exposure, the useful-information rate is
+    approximated by
+
+        1 / ((1 + tau_read / t) * (1 + overhead / t)),
+
+    where tau_read = RN^2 / (sky + dark).  Solving the quadratic avoids the
+    previous two bad extremes: rounding just below the sky-limited floor, and
+    treating the user-entered maximum as the recommendation itself.
+    """
+    linear_rate = max(background_rate_e_per_pix + dark_current_e_per_pix_sec, 1e-12)
+    read_noise_time = max(read_noise_e, 0.0) ** 2 / linear_rate
+    overhead = max(frame_overhead_sec, 0.0)
+    efficiency = min(0.99, max(0.50, target_efficiency))
+    loss = 1.0 / efficiency - 1.0
+    linear = read_noise_time + overhead
+    discriminant = linear**2 + 4.0 * loss * read_noise_time * overhead
+    exposure = (linear + math.sqrt(max(discriminant, 0.0))) / max(2.0 * loss, 1e-12)
+    return float(exposure), float(read_noise_time)
+
+
+def _exposure_efficiency(
+    exposure_sec: float,
+    *,
+    read_noise_time_sec: float,
+    frame_overhead_sec: float,
+) -> float:
+    if exposure_sec <= 0:
+        return 0.0
+    return float(
+        1.0
+        / (
+            (1.0 + max(read_noise_time_sec, 0.0) / exposure_sec)
+            * (1.0 + max(frame_overhead_sec, 0.0) / exposure_sec)
+        )
+    )
+
+
+def _friendly_round_up(seconds: float, minimum: float) -> float:
+    """Round an efficiency floor up to a practical camera-friendly value."""
+    if seconds <= minimum:
+        return float(minimum)
+    if seconds < 2:
+        step = 0.1
+    elif seconds < 10:
+        step = 0.5
+    elif seconds < 30:
+        step = 1.0
+    elif seconds < 120:
+        step = 5.0
+    elif seconds < 300:
+        step = 10.0
+    else:
+        step = 30.0
+    return float(max(minimum, math.ceil(seconds / step - 1e-12) * step))
+
+
 def _build_plan(
     *,
     profile: EquipmentProfile,
@@ -461,7 +527,16 @@ def _build_plan(
     else:
         warnings.append("장비 프로필에 센서 포화 ADU가 없어 포화 기반 상한을 적용하지 못했습니다.")
 
-    limiting, practical_upper = min(upper_candidates, key=lambda item: item[1])
+    hard_upper_constraint, practical_upper = min(upper_candidates, key=lambda item: item[1])
+    exposure_efficiency_target = 0.90
+    efficiency_lower, read_noise_time = _exposure_efficiency_time(
+        background_rate_e_per_pix=bg_rate_e,
+        dark_current_e_per_pix_sec=dark,
+        read_noise_e=rn,
+        frame_overhead_sec=frame_overhead_sec,
+        target_efficiency=exposure_efficiency_target,
+    )
+    efficiency_goal = max(sky_lower, efficiency_lower)
     constraint_inputs = {
         "target_snr": float(target_snr),
         "min_sub_exposure_sec": float(min_sub_exposure_sec),
@@ -488,7 +563,8 @@ def _build_plan(
             "reference_star_saturation_diagnostic_sec": saturation_upper,
             "target_saturation_upper_sec": target_saturation_upper,
             "practical_upper_sec": practical_upper,
-            "limiting_constraint": limiting,
+            "limiting_constraint": hard_upper_constraint,
+            "hard_upper_constraint": hard_upper_constraint,
             "selection_basis": "no_feasible_interval",
             "constraint_status": "invalid",
             "constraint_inputs": constraint_inputs,
@@ -496,20 +572,71 @@ def _build_plan(
             "warnings": warnings + ["안전 상한이 설정된 최소 단일노출보다 짧습니다."],
         }
 
-    # Safety fractions are already encoded in the physical upper bounds.  For a
-    # fixed total SNR, longer safe sub-exposures reduce read-noise and per-frame
-    # overhead, so choose the highest feasible upper bound.  The old min(lower,
-    # upper) expression could turn a user maximum of 110 s into 45 s and even
-    # round below the calculated 49 s read-noise-efficiency lower bound.
-    recommended = _safe_round_down(practical_upper, min_sub_exposure_sec)
-    if recommended < practical_upper * 0.95:
-        precision = 10.0 if practical_upper < 100.0 else 1.0
-        recommended = math.floor(practical_upper * precision) / precision
+    # The user maximum is a cap, not a desired exposure.  Select the shortest
+    # exposure that reaches the fixed efficiency target.  A measured reference
+    # field peak is not a universal hard limit, but it is useful as a conservative
+    # advisory ceiling when the efficiency target would otherwise exceed it.
+    selection_target = min(practical_upper, efficiency_goal)
+    selection_basis = "efficiency_target"
+    limiting_constraint = "exposure_efficiency_target"
+    reference_advisory_applied = False
+    if practical_upper < efficiency_goal:
+        selection_basis = "hard_upper_before_efficiency_target"
+        limiting_constraint = hard_upper_constraint
+    if saturation_upper is not None and saturation_upper < selection_target:
+        selection_target = max(min_sub_exposure_sec, saturation_upper)
+        selection_basis = "reference_star_advisory_before_efficiency_target"
+        limiting_constraint = "reference_star_advisory"
+        reference_advisory_applied = True
+        warnings.append(
+            "기준 시야의 대표 별 포화 진단이 효율 목표보다 짧아 보수적인 권장값에 반영했습니다. "
+            "이는 현재 시야의 절대 포화 보장이 아니라 장비 기준 영상에 근거한 권고입니다."
+        )
+    if selection_basis == "efficiency_target":
+        recommended = min(practical_upper, _friendly_round_up(selection_target, min_sub_exposure_sec))
+        if saturation_upper is not None and recommended > saturation_upper:
+            recommended = _safe_round_down(max(min_sub_exposure_sec, saturation_upper), min_sub_exposure_sec)
+            selection_basis = "reference_star_advisory_before_efficiency_target"
+            limiting_constraint = "reference_star_advisory"
+            reference_advisory_applied = True
+            warnings.append(
+                "효율 목표를 실용 간격으로 올림하면 기준 시야의 대표 별 포화 진단을 넘으므로 "
+                "보수적인 기준별 권고값으로 내렸습니다."
+            )
+    else:
+        recommended = _safe_round_down(selection_target, min_sub_exposure_sec)
+        if recommended < selection_target * 0.95:
+            precision = 10.0 if selection_target < 100.0 else 1.0
+            recommended = math.floor(selection_target * precision) / precision
     recommended = min(practical_upper, max(min_sub_exposure_sec, recommended))
     sky_limited_feasible = sky_lower <= practical_upper
-    constraint_status = "sky_limited" if sky_limited_feasible else "upper_bound_compromise"
+    sky_limited_achieved = recommended >= sky_lower
+    efficiency_target_achieved = recommended >= efficiency_lower
+    if not sky_limited_feasible:
+        constraint_status = "upper_bound_compromise"
+    elif reference_advisory_applied and not efficiency_target_achieved:
+        constraint_status = "reference_saturation_compromise"
+    elif efficiency_target_achieved:
+        constraint_status = "efficiency_balanced"
+    else:
+        constraint_status = "bounded_below_efficiency_target"
     if not sky_limited_feasible:
         warnings.append("포화/추적 상한이 읽기잡음 효율 하한보다 짧아 포화 여유를 우선했습니다.")
+    elif not efficiency_target_achieved:
+        warnings.append(
+            "안전/사용자 상한 때문에 읽기잡음과 프레임 오버헤드를 합친 90% 효율 목표에는 미달합니다."
+        )
+    elif practical_upper > recommended * 1.25:
+        warnings.append(
+            "최대 단일노출은 허용 상한이며 추천값 자체가 아닙니다. 더 긴 노출의 효율 증가는 작고 "
+            "추적·포화·우주선 영향 위험은 커질 수 있어 효율 목표를 만족하는 짧은 값을 선택했습니다."
+        )
+
+    efficiency_at_recommendation = _exposure_efficiency(
+        recommended,
+        read_noise_time_sec=read_noise_time,
+        frame_overhead_sec=frame_overhead_sec,
+    )
 
     snr_sub: float | None = None
     frames: int | None = None
@@ -576,10 +703,17 @@ def _build_plan(
         "reference_star_saturation_diagnostic_sec": None if saturation_upper is None else float(saturation_upper),
         "target_saturation_upper_sec": None if target_saturation_upper is None else float(target_saturation_upper),
         "practical_upper_sec": float(practical_upper),
-        "limiting_constraint": limiting,
-        "selection_basis": "highest_safe_upper_bound",
+        "limiting_constraint": limiting_constraint,
+        "hard_upper_constraint": hard_upper_constraint,
+        "selection_basis": selection_basis,
         "constraint_status": constraint_status,
         "sky_limited_feasible": bool(sky_limited_feasible),
+        "sky_limited_achieved": bool(sky_limited_achieved),
+        "exposure_efficiency_target": exposure_efficiency_target,
+        "exposure_efficiency_lower_sec": float(efficiency_lower),
+        "exposure_efficiency_at_recommendation": efficiency_at_recommendation,
+        "read_noise_time_constant_sec": float(read_noise_time),
+        "reference_star_advisory_applied": reference_advisory_applied,
         "constraint_inputs": constraint_inputs,
         "confidence": confidence,
         "warnings": warnings,

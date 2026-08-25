@@ -932,6 +932,15 @@ function validityLabel(value) {
 
 function confidenceLabel(value) { return { high: "높음", medium: "보통", low: "낮음", none: "없음" }[value] || value || "낮음"; }
 
+function exposureSelectionLabel(value) {
+  return {
+    efficiency_target: "효율 90% 도달",
+    hard_upper_before_efficiency_target: "안전 상한 우선",
+    reference_star_advisory_before_efficiency_target: "기준별 포화 권고 우선",
+    no_feasible_interval: "가능 구간 없음",
+  }[value] || value || "선택 근거 없음";
+}
+
 function renderList(container, items) {
   container.innerHTML = "";
   (items || []).forEach((item) => {
@@ -989,7 +998,7 @@ function renderResult(result) {
   const plan = result.plan || {};
   $("validityBadge").textContent = validityLabel(result.validity);
   $("resultTargetName").textContent = result.target?.name || "분석 결과";
-  $("resultDetail").textContent = `${result.equipment_profile?.name || "장비 프로필"} · ${result.target?.object_type || "천체"} · 신호 모델 ${result.target_signal_model?.source || "없음"}`;
+  $("resultDetail").textContent = `${result.equipment_profile?.name || "장비 프로필"} · ${result.target?.object_type || "천체"} · 단일노출 ${exposureSelectionLabel(plan.selection_basis)} · 신호 모델 ${result.target_signal_model?.source || "없음"}`;
   $("confidenceBox").textContent = `신뢰도 ${confidenceLabel(result.confidence)} · ${validityLabel(result.validity)}`;
   $("mSub").textContent = plan.recommended_sub_exposure_sec == null ? "확정 불가" : formatSeconds(plan.recommended_sub_exposure_sec);
   $("mSnr").textContent = formatNumber(plan.predicted_snr_per_sub, 2);
