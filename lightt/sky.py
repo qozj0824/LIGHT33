@@ -237,6 +237,8 @@ def build_sky_map(
         fisheye,
         coordinate_scale_x=total_scale_x,
         coordinate_scale_y=total_scale_y,
+        observation_lst_sec=frame.metadata.extra.get("local_sidereal_time_sec"),
+        site_latitude_deg=frame.metadata.extra.get("site_latitude_deg"),
     )
     solid_angle_map: np.ndarray | None = None
     # Direction lookup may be report-validated in detector pixels while absolute

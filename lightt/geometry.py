@@ -30,6 +30,9 @@ def load_fisheye_config(path: Path) -> FisheyeConfig:
         rotation_vector=[float(v) for v in data.get("rotation_vector", [])],
         radial_theta_coefficients=[float(v) for v in data.get("radial_theta_coefficients", [])],
         mirror_x=bool(data.get("mirror_x", False)),
+        tracking_mode=str(data.get("tracking_mode") or "") or None,
+        tracking_reference_lst_sec=_optional_float(data.get("tracking_reference_lst_sec")),
+        tracking_site_latitude_deg=_optional_float(data.get("tracking_site_latitude_deg")),
         fit_star_count=int(data.get("fit_star_count", 0) or 0),
         fit_rms_deg=_optional_float(data.get("fit_rms_deg")),
         fit_edge_rms_deg=_optional_float(data.get("fit_edge_rms_deg")),
@@ -99,6 +102,50 @@ def _rotation_matrix_from_rotvec(rotation_vector: list[float]) -> np.ndarray:
     x, y, z = axis
     skew = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=np.float64)
     return np.eye(3) + math.sin(angle) * skew + (1.0 - math.cos(angle)) * (skew @ skew)
+
+
+def _advance_local_enu_for_sidereal_tracking(
+    local_vectors: np.ndarray,
+    *,
+    site_latitude_deg: float,
+    reference_lst_sec: float,
+    observation_lst_sec: float,
+) -> np.ndarray:
+    """Advance reference-epoch ENU vectors to a new local sidereal time.
+
+    A tracking all-sky camera keeps detector coordinates nearly fixed on the
+    celestial sphere.  The fitted camera rotation therefore maps detector rays
+    to *reference-epoch* local ENU, not to a permanently fixed local direction.
+    Convert those rays to (declination, hour angle), add the LST difference, and
+    transform back to local ENU at the observation epoch.
+    """
+    vectors = np.asarray(local_vectors, dtype=np.float64)
+    phi = math.radians(float(site_latitude_deg))
+    east = vectors[..., 0]
+    north = vectors[..., 1]
+    up = vectors[..., 2]
+    norm = np.sqrt(east * east + north * north + up * up)
+    east = np.divide(east, norm, out=np.zeros_like(east), where=norm > 1e-12)
+    north = np.divide(north, norm, out=np.zeros_like(north), where=norm > 1e-12)
+    up = np.divide(up, norm, out=np.zeros_like(up), where=norm > 1e-12)
+
+    sin_dec = np.clip(north * math.cos(phi) + up * math.sin(phi), -1.0, 1.0)
+    dec = np.arcsin(sin_dec)
+    cos_dec_cos_h = up * math.cos(phi) - north * math.sin(phi)
+    cos_dec_sin_h = -east
+    hour_angle = np.arctan2(cos_dec_sin_h, cos_dec_cos_h)
+
+    # FITS LST is expressed in sidereal seconds (24 h = 86400 s).
+    delta_lst = (float(observation_lst_sec) - float(reference_lst_sec)) * (2.0 * math.pi / 86400.0)
+    hour_angle = hour_angle + delta_lst
+    sin_dec = np.sin(dec)
+    cos_dec = np.cos(dec)
+    sin_h = np.sin(hour_angle)
+    cos_h = np.cos(hour_angle)
+    current_east = -cos_dec * sin_h
+    current_north = sin_dec * math.cos(phi) - cos_dec * cos_h * math.sin(phi)
+    current_up = sin_dec * math.sin(phi) + cos_dec * cos_h * math.cos(phi)
+    return np.stack([current_east, current_north, current_up], axis=-1)
 
 
 def _theta_from_radial_radius(
@@ -257,7 +304,10 @@ def validate_fisheye_directional_calibration(config: FisheyeConfig) -> list[str]
             errors.append("APICAM 보정 회전벡터가 완전하지 않습니다.")
         if config.fit_star_count < 15:
             errors.append("APICAM 보정에 사용한 기준별 수가 15개 미만이거나 기록되지 않았습니다.")
-        # The supplied APICAM solution is a same-frame bright-star fit.  It is
+        if str(config.tracking_mode or "").lower() == "sidereal":
+            if config.tracking_reference_lst_sec is None or config.tracking_site_latitude_deg is None:
+                errors.append("APICAM 추적식 좌표변환의 기준 LST/관측소 위도가 기록되지 않았습니다.")
+        # APICAM temporal hold-out validation is recorded in detector pixels.
         # intentionally allowed for planning/background lookup but is not
         # promoted to independently validated quantitative direction accuracy.
         if config.validation_star_count < 10 or config.validation_max_error_px is None:
@@ -305,6 +355,8 @@ def pixel_to_altaz(
     *,
     coordinate_scale_x: float = 1.0,
     coordinate_scale_y: float = 1.0,
+    observation_lst_sec: float | None = None,
+    site_latitude_deg: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -374,6 +426,16 @@ def pixel_to_altaz(
         rotation = _rotation_matrix_from_rotvec(config.rotation_vector)
         # Forward calibration is camera = R @ local_ENU, so invert with R.T.
         local_vectors = camera_vectors @ rotation
+        if str(config.tracking_mode or "").lower() == "sidereal":
+            reference_lst = config.tracking_reference_lst_sec
+            latitude = site_latitude_deg if site_latitude_deg is not None else config.tracking_site_latitude_deg
+            if reference_lst is not None and observation_lst_sec is not None and latitude is not None:
+                local_vectors = _advance_local_enu_for_sidereal_tracking(
+                    local_vectors,
+                    site_latitude_deg=float(latitude),
+                    reference_lst_sec=float(reference_lst),
+                    observation_lst_sec=float(observation_lst_sec),
+                )
         east = local_vectors[..., 0]
         north = local_vectors[..., 1]
         up = local_vectors[..., 2]

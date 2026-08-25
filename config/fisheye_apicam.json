@@ -5,15 +5,40 @@
   "sensor_width": 4096,
   "sensor_height": 4096,
   "focal_length_px": 1337.07097,
-  "rotation_vector": [-0.0292604630, 0.0984226934, -3.09486171],
-  "radial_theta_coefficients": [-0.0405882265, 0.00135696633],
+  "rotation_vector": [
+    -0.029260463,
+    0.0984226934,
+    -3.09486171
+  ],
+  "radial_theta_coefficients": [
+    -0.0405882265,
+    0.00135696633
+  ],
   "mirror_x": true,
   "fit_star_count": 36,
   "fit_rms_deg": null,
   "fit_edge_rms_deg": null,
   "validation_star_count": 0,
   "validation_max_error_px": null,
-  "validation_basis": "NØXIS v35.6 same-frame bright-star fit on ESO APICAM APICAM.2018-06-14T04:00:23.000; median nearest-star residual ~0.94 px and fit-set RMS ~1.01 px for 36 matched bright-star positions. This is not an independent hold-out validation, so direction/Csys quality remains planning until external validation is completed.",
+  "validation_basis": "Absolute APICAM camera-model fit: 36 bright stars on ESO APICAM APICAM.2018-06-14T04:00:23.000 (same-frame fit; not an independent absolute hold-out). v35.10 temporal hold-out: four independent ESO archive frames at 03:57:55, 04:02:50, 04:05:18, and 04:07:45 UTC; 10 bright-star centroids per frame stayed within max 2.94 px of their reference detector positions (RMS 0.91-2.65 px), confirming sidereal tracking stability. Because this temporal test does not independently establish absolute sky coordinates, direction/Csys quality intentionally remains planning.",
   "calibration_date": "2026-08-24",
-  "camera_lens_id": "ESO APICAM-3 KAF-16803 + Canon 12mm 180-degree fisheye"
+  "camera_lens_id": "ESO APICAM-3 KAF-16803 + Canon 12mm 180-degree fisheye",
+  "tracking_mode": "sidereal",
+  "tracking_reference_lst_sec": 60503.37596499584,
+  "tracking_site_latitude_deg": -24.6275997,
+  "tracking_temporal_holdout_frame_count": 4,
+  "tracking_temporal_holdout_star_samples": 40,
+  "tracking_temporal_holdout_max_drift_px": 2.94,
+  "tracking_temporal_holdout_rms_px_range": [
+    0.91,
+    2.65
+  ],
+  "pedestal_holdout_frame_count": 4,
+  "pedestal_reference_and_holdout_medians_adu": [
+    548.0,
+    548.0,
+    548.0,
+    548.0,
+    548.0
+  ]
 }

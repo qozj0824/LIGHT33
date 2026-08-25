@@ -82,6 +82,14 @@ class FisheyeConfig:
     rotation_vector: list[float] = field(default_factory=list)
     radial_theta_coefficients: list[float] = field(default_factory=list)
     mirror_x: bool = False
+    # Optional sky-tracking model. APICAM-3 is mounted on a sidereal tracking
+    # station, so its camera orientation is approximately fixed in celestial
+    # coordinates rather than fixed to local ENU.  The calibration rotation is
+    # anchored at tracking_reference_lst_sec and local directions are advanced
+    # to the observation LST before sky-map binning.
+    tracking_mode: str | None = None
+    tracking_reference_lst_sec: float | None = None
+    tracking_site_latitude_deg: float | None = None
     fit_star_count: int = 0
     fit_rms_deg: float | None = None
     fit_edge_rms_deg: float | None = None

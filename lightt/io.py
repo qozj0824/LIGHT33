@@ -226,6 +226,9 @@ def _load_fits(path: Path) -> ImageFrame:
                 "site_latitude_deg": site_latitude,
                 "site_longitude_deg": site_longitude,
                 "site_height_m": site_height_m,
+                "local_sidereal_time_sec": _header_float(
+                    header, ["LST", "SIDTIME", "ST"], positive=False
+                ),
             },
         )
         return ImageFrame(
