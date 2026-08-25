@@ -35,6 +35,9 @@ def test_basic_and_restored_feature_ui_tokens() -> None:
         "sky_reliability",
         "exposure_snr_curve",
         "upload_token",
+        "scope_preview_data_url",
+        "allsky_preview_data_url",
+        "allskyInspecting",
     ]:
         assert token in javascript
 
@@ -53,6 +56,7 @@ def test_inspect_returns_role_specific_preview_and_token() -> None:
     payload = response.json()
     assert payload["preview_url"].endswith("/scope_preview.png")
     assert len(payload["upload_token"]) == 24
+    assert payload["inspection_timing_sec"]["total"] >= 0
     result_path = app_module.ROOT / payload["preview_url"].lstrip("/")
     assert result_path.exists()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from astropy.io import fits
 from PIL import Image
 from PIL.TiffImagePlugin import IFDRational
@@ -83,3 +84,27 @@ def test_exif_rational_exposure_is_read_as_seconds(tmp_path):
     assert frame.metadata.exposure_sec is not None
     assert abs(frame.metadata.exposure_sec - 0.008) < 1e-9
     assert frame.metadata.extra["exposure_provenance"]["selected_key"] == "EXIF ExposureTime"
+
+
+def test_wcs_center_uses_only_celestial_cards_from_observatory_header(tmp_path):
+    path = tmp_path / "observatory.fits"
+    hdu = fits.PrimaryHDU(np.ones((80, 100), dtype=np.int16))
+    hdu.header["EXPTIME"] = 120.0
+    hdu.header["CTYPE1"] = "RA---TAN"
+    hdu.header["CTYPE2"] = "DEC--TAN"
+    hdu.header["CRPIX1"] = 50.5
+    hdu.header["CRPIX2"] = 40.5
+    hdu.header["CRVAL1"] = 251.7349
+    hdu.header["CRVAL2"] = -2.0181
+    hdu.header["CD1_1"] = -0.0001
+    hdu.header["CD1_2"] = 0.0
+    hdu.header["CD2_1"] = 0.0
+    hdu.header["CD2_2"] = 0.0001
+    for index in range(150):
+        hdu.header[f"HIERARCH ESO INS TEST{index}"] = (float(index), "unrelated instrument card")
+    hdu.writeto(path)
+
+    frame = load_image(path)
+    assert frame.metadata.exposure_sec == 120.0
+    assert frame.metadata.extra["wcs_center_ra_deg"] == pytest.approx(251.7349, abs=1e-6)
+    assert frame.metadata.extra["wcs_center_dec_deg"] == pytest.approx(-2.0181, abs=1e-6)

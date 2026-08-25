@@ -22,6 +22,7 @@ from .models import AnalysisSettings, CalibrationSet
 from .photometry import analyze_saturation, measure_extended_source, measure_point_source, measure_stars
 from .sky import build_sky_map, prepare_sky_analysis_frame
 from .time_utils import image_observation_time_utc, observation_time_difference_minutes, parse_observation_datetime
+from .visualization import save_scope_preview
 
 
 PROFILE_SCHEMA_VERSION = 6
@@ -429,6 +430,10 @@ def create_equipment_profile(
 
     try:
         scope_original = load_image(scope_path)
+        try:
+            save_scope_preview(scope_original.intensity, directory / "preview_scope.png", max_dim=900)
+        except Exception as exc:
+            warnings.append(f"망원경 기준 영상 미리보기 저장을 생략했습니다: {type(exc).__name__}")
         target, reference_epoch_delta_min, reference_position_source, reference_capture_time_utc = (
             _prepare_reference_target_for_capture(target, scope_original, warnings)
         )
@@ -617,6 +622,10 @@ def create_equipment_profile(
         if reference_allsky_path is not None:
             allsky_filename = reference_allsky_path.name
             allsky_original = load_image(reference_allsky_path)
+            try:
+                save_scope_preview(allsky_original.intensity, directory / "preview_allsky.png", max_dim=900)
+            except Exception as exc:
+                warnings.append(f"전천 기준 영상 미리보기 저장을 생략했습니다: {type(exc).__name__}")
             paired_epoch_delta_min = observation_time_difference_minutes(
                 scope_original.metadata.date_obs,
                 allsky_original.metadata.date_obs,

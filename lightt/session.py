@@ -440,6 +440,7 @@ def _build_plan(
     frame_overhead_sec: float,
     background_uncertainty_fraction: float = 0.0,
     signal_uncertainty_fraction: float = 0.0,
+    target_signal_rate_e_per_pixel: float | None = None,
 ) -> dict[str, Any]:
     warnings: list[str] = []
     gain = profile.gain_e_per_adu
@@ -503,6 +504,26 @@ def _build_plan(
             upper_candidates.append(("target_saturation", target_saturation_upper))
         elif target["target_mode"] == "point":
             warnings.append("점광원 대상의 PSF peak 비율이 없어 대상 자체의 포화 상한은 별도로 계산하지 못했습니다.")
+        elif target_signal_rate_e_per_pixel is not None and target_signal_rate_e_per_pixel > 0:
+            _, limited_extended_target = _target_scope_flags(target)
+            # Integrated magnitude + angular area yields a mean surface brightness.
+            # A modest structure factor protects bright planetary bands, lunar
+            # terrain and compact cores without pretending that a catalogue value
+            # is a resolved surface map.
+            structure_factor = 2.0 if limited_extended_target else 1.5
+            target_peak_rate = (
+                target_signal_rate_e_per_pixel
+                * (1.0 + signal_uncertainty_fraction)
+                * structure_factor
+            )
+            target_saturation_upper = (fullwell_e * saturation_safety_fraction) / max(
+                target_peak_rate + bg_rate_e_high + dark, 1e-12
+            )
+            upper_candidates.append(("target_saturation", target_saturation_upper))
+            warnings.append(
+                "확산 대상은 평균 표면밝기에 국소 구조 안전계수를 적용해 대상 자체의 픽셀 포화 상한을 계산했습니다. "
+                "행성·달의 세부 무늬나 성운의 밝은 핵은 시험 촬영으로 추가 확인하세요."
+            )
         else:
             warnings.append(
                 "확산천체의 국소 최고 표면밝기와 오늘 시야의 가장 밝은 별은 카탈로그 통합등급만으로 "
@@ -547,6 +568,11 @@ def _build_plan(
         "effective_pixels": int(effective_pixels),
         "background_uncertainty_fraction": float(background_uncertainty_fraction),
         "signal_uncertainty_fraction": float(signal_uncertainty_fraction),
+        "target_signal_rate_e_per_pixel": (
+            None
+            if target_signal_rate_e_per_pixel is None
+            else float(target_signal_rate_e_per_pixel)
+        ),
     }
     if practical_upper < min_sub_exposure_sec:
         return {
@@ -568,7 +594,10 @@ def _build_plan(
             "constraint_status": "invalid",
             "constraint_inputs": constraint_inputs,
             "confidence": "none",
-            "warnings": warnings + ["안전 상한이 설정된 최소 단일노출보다 짧습니다."],
+            "warnings": warnings + [
+                "안전 상한이 설정된 최소 단일노출보다 짧습니다. "
+                f"최소 단일노출을 {max(practical_upper, 0.001):.3g}초 이하로 낮추세요."
+            ],
         }
 
     # The user maximum is a cap, not a desired exposure.  Select the shortest
@@ -995,6 +1024,7 @@ def run_session_analysis(
         frame_overhead_sec=frame_overhead_sec,
         background_uncertainty_fraction=background_uncertainty_fraction,
         signal_uncertainty_fraction=signal_uncertainty_fraction,
+        target_signal_rate_e_per_pixel=signal_per_pixel,
     )
     warnings.extend(plan["warnings"])
 

@@ -522,6 +522,50 @@ def test_narrowband_catalog_signal_is_explicitly_marked_approximate():
     assert any("협대역" in item for item in warnings)
 
 
+def test_jupiter_surface_brightness_sets_subsecond_target_saturation_limit():
+    p = profile(
+        gain_e_per_adu=1.25,
+        sensor_clip_adu=65535.0,
+        pixel_scale_arcsec=0.252,
+        photometric_zero_point_mag=21.3486,
+        reference_airmass=1.0,
+    )
+    target = {
+        "name": "Jupiter",
+        "object_type": "Planet",
+        "target_mode": "extended",
+        "vmag": -2.2,
+        "vmage": None,
+        "size_deg": 40.0 / 3600.0,
+        "alt_deg": 60.0,
+    }
+    total, per_pixel, source, _, _ = _signal_model(p, target, 100, None, None)
+    assert total is not None and per_pixel is not None
+    assert source.startswith("integrated_mag_plus_size")
+    blocked = _build_plan(
+        profile=p,
+        target=target,
+        background_rate_adu_per_pix=1.0,
+        target_signal_rate_e=total,
+        target_signal_rate_e_per_pixel=per_pixel,
+        effective_pixels=100,
+        target_snr=100.0,
+        min_sub_exposure_sec=1.0,
+        max_sub_exposure_sec=600.0,
+        tracking_limit_sec=0.0,
+        background_limit_fraction=0.30,
+        saturation_safety_fraction=0.80,
+        stack_efficiency=0.90,
+        max_frames=2000,
+        frame_overhead_sec=2.0,
+        signal_uncertainty_fraction=0.5,
+    )
+    assert blocked["status"] == "invalid"
+    assert blocked["hard_upper_constraint"] == "target_saturation"
+    assert 0 < blocked["target_saturation_upper_sec"] < 1.0
+    assert any("최소 단일노출" in warning for warning in blocked["warnings"])
+
+
 def test_reference_epoch_mismatch_no_longer_blocks_basic_profile(monkeypatch):
     from lightt.equipment import _prepare_reference_target_for_capture
     from lightt.models import ImageFrame, ImageMetadata

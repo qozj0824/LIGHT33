@@ -12,6 +12,8 @@ const state = {
   creatingProfile: false,
   allskyInspectSequence: 0,
   allskyInspectController: null,
+  allskyInspecting: false,
+  allskyInspectFailed: false,
   referenceScopeMetadata: null,
   referenceScopeCaptureTimeUtc: null,
   referenceScopeInspectSequence: 0,
@@ -102,6 +104,35 @@ function saveProfileSnapshot(profile) {
   } catch { /* localStorage may be unavailable; server profile still works. */ }
 }
 
+async function compactPreviewDataUrl(url) {
+  if (!url || String(url).startsWith("data:")) return url || null;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) return null;
+    const bitmap = await createImageBitmap(await response.blob());
+    const scale = Math.min(1, 640 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    return canvas.toDataURL("image/jpeg", 0.72);
+  } catch { return null; }
+}
+
+async function cacheProfilePreviewData(profile) {
+  if (!profile?.profile_id) return profile;
+  const existing = getProfileSnapshot(profile.profile_id) || {};
+  const enriched = { ...existing, ...profile };
+  if (!enriched.scope_preview_data_url && profile.scope_preview_url) {
+    enriched.scope_preview_data_url = await compactPreviewDataUrl(profile.scope_preview_url);
+  }
+  if (!enriched.allsky_preview_data_url && profile.allsky_preview_url) {
+    enriched.allsky_preview_data_url = await compactPreviewDataUrl(profile.allsky_preview_url);
+  }
+  return enriched;
+}
+
 function removeProfileSnapshot(profileId) {
   try {
     const snapshots = loadProfileSnapshots();
@@ -120,7 +151,10 @@ async function cacheServerProfileSnapshots(profiles) {
     try {
       const response = await fetch(`/api/equipment/profiles/${encodeURIComponent(profile.profile_id)}`, { cache: "no-store" });
       const payload = await readJsonResponse(response);
-      if (response.ok && payload?.profile_id) saveProfileSnapshot(payload);
+      if (response.ok && payload?.profile_id) {
+        const cached = await cacheProfilePreviewData({ ...payload, ...profile });
+        saveProfileSnapshot(cached);
+      }
     } catch { }
   }));
 }
@@ -295,17 +329,22 @@ async function inspectAllsky(file) {
   state.allskyToken = null;
   state.allskyMetadata = null;
   state.allskyAssessment = null;
+  state.allskyInspecting = Boolean(file);
+  state.allskyInspectFailed = false;
   showLocalPreview(file, "allskyPreview", "main-allsky", "allskyPreviewPlaceholder");
   if (!file) {
     $("allskyName").textContent = "선택 안 됨";
     $("allskyPreviewStatus").textContent = "";
     $("allskyMetadata").textContent = "";
     state.allskyInspectController = null;
+    state.allskyInspecting = false;
     updateReadyState();
     return;
   }
   $("allskyName").textContent = file.name;
-  $("allskyPreviewStatus").textContent = "";
+  $("allskyPreviewStatus").textContent = "헤더·미리보기 읽는 중";
+  $("allskyMetadata").textContent = `${file.name} · 서버에서 FITS 헤더를 확인하고 있습니다.`;
+  updateReadyState();
   const form = new FormData();
   form.append("file", file);
   form.append("role", "allsky");
@@ -319,6 +358,7 @@ async function inspectAllsky(file) {
     state.allskyToken = payload.upload_token || null;
     state.allskyMetadata = payload.metadata || null;
     state.allskyAssessment = payload.assessment || null;
+    state.allskyInspectFailed = false;
     showServerPreview(payload.preview_url, "allskyPreview", "allskyPreviewPlaceholder");
     $("allskyPreviewStatus").textContent = assessmentLabel(payload.assessment);
     const assessmentText = assessmentSummary(payload.assessment);
@@ -329,11 +369,13 @@ async function inspectAllsky(file) {
   } catch (error) {
     if (error?.name === "AbortError" || sequence !== state.allskyInspectSequence) return;
     // Keep the browser preview usable. The original file is retried during analysis.
-    $("allskyPreviewStatus").textContent = "";
-    $("allskyMetadata").textContent = file?.name || "";
+    state.allskyInspectFailed = true;
+    $("allskyPreviewStatus").textContent = "검사 재시도 가능";
+    $("allskyMetadata").textContent = `${file?.name || ""} · 빠른 검사에 실패했지만 분석 시 원본을 다시 읽습니다.`;
   } finally {
     if (sequence === state.allskyInspectSequence) {
       state.allskyInspectController = null;
+      state.allskyInspecting = false;
       updateReadyState();
     }
   }
@@ -663,7 +705,8 @@ async function createEquipmentProfile() {
     if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
     const warningText = Array.isArray(payload.warnings) && payload.warnings.length ? ` · 확인 ${payload.warnings.length}` : "";
     $("profileCreateStatus").textContent = `생성 완료 · ${payload.confidence}${warningText}`;
-    saveProfileSnapshot(payload);
+    const cachedProfile = await cacheProfilePreviewData(payload);
+    saveProfileSnapshot(cachedProfile);
     await loadProfiles(payload.profile_id);
   } catch (error) {
     $("profileCreateStatus").textContent = `프로필 생성 실패: ${error.message}`;
@@ -718,12 +761,17 @@ async function loadProfiles(selectId = null) {
     const payload = await readJsonResponse(response);
     if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
     const serverProfiles = payload.profiles || [];
-    await cacheServerProfileSnapshots(serverProfiles);
+    void cacheServerProfileSnapshots(serverProfiles);
     const snapshots = loadProfileSnapshots();
     const serverIds = new Set(serverProfiles.map((item) => item.profile_id));
     const recoveredProfiles = Object.values(snapshots)
       .filter((item) => item?.profile_id && !serverIds.has(item.profile_id))
-      .map((item) => ({ ...item, browser_recovery: true, scope_preview_url: null, allsky_preview_url: null }));
+      .map((item) => ({
+        ...item,
+        browser_recovery: true,
+        scope_preview_url: item.scope_preview_data_url || null,
+        allsky_preview_url: item.allsky_preview_data_url || null,
+      }));
     state.profiles = [...serverProfiles, ...recoveredProfiles];
     const select = $("equipmentProfile");
     select.innerHTML = "";
@@ -748,7 +796,12 @@ async function loadProfiles(selectId = null) {
     renderSelectedProfile();
   } catch {
     const snapshots = Object.values(loadProfileSnapshots()).filter((item) => item?.profile_id);
-    state.profiles = snapshots.map((item) => ({ ...item, browser_recovery: true, scope_preview_url: null, allsky_preview_url: null }));
+    state.profiles = snapshots.map((item) => ({
+      ...item,
+      browser_recovery: true,
+      scope_preview_url: item.scope_preview_data_url || null,
+      allsky_preview_url: item.allsky_preview_data_url || null,
+    }));
     const select = $("equipmentProfile");
     select.innerHTML = "";
     if (state.profiles.length) {
@@ -774,7 +827,9 @@ function setSavedPreview(imageId, url) {
   if (!image) return;
   if (!url) { image.removeAttribute("src"); image.classList.add("empty-preview"); return; }
   image.classList.remove("empty-preview");
-  image.src = `${url}${url.includes("?") ? "&" : "?"}v=${Date.now()}`;
+  image.src = String(url).startsWith("data:")
+    ? url
+    : `${url}${url.includes("?") ? "&" : "?"}v=${Date.now()}`;
 }
 
 function renderSelectedProfile() {
@@ -804,12 +859,17 @@ function updateReadyState() {
   const hasAllsky = Boolean(state.allskyToken || $("allsky")?.files?.[0]);
   const hasProfile = Boolean($("equipmentProfile").value);
   const hasAllskyExposure = Boolean(
-    Number(state.allskyMetadata?.exposure_sec) > 0 || Number(valueOrNull("allskyExposure")) > 0
+    Number(state.allskyMetadata?.exposure_sec) > 0
+      || Number(valueOrNull("allskyExposure")) > 0
+      || state.allskyInspectFailed
   );
   const targetKnown = Boolean(state.target && Number.isFinite(Number(state.target.alt_deg)));
   const targetGood = targetKnown && Number(state.target.alt_deg) >= Number($("minimumSkyAltitude").value || 15);
   const targetFresh = Boolean(state.stellariumFresh);
-  const ready = Boolean(hasAllsky && hasAllskyExposure && hasProfile && targetGood && targetFresh && !state.analyzing);
+  const ready = Boolean(
+    hasAllsky && hasAllskyExposure && hasProfile && targetGood && targetFresh
+      && !state.analyzing && !state.allskyInspecting
+  );
   const button = $("analyzeButton");
   button.disabled = !ready;
 
@@ -819,9 +879,15 @@ function updateReadyState() {
   } else if (!hasAllsky) {
     button.textContent = "전천 영상을 선택하세요";
     $("readyStatus").textContent = "";
+  } else if (state.allskyInspecting) {
+    button.textContent = "영상 헤더 읽는 중…";
+    $("readyStatus").textContent = "노출시간과 미리보기를 확인하고 있습니다.";
   } else if (!hasAllskyExposure) {
     button.textContent = "전천 노출시간을 입력하세요";
     $("readyStatus").textContent = "영상 헤더에서 노출시간을 읽지 못했습니다.";
+  } else if (state.allskyInspectFailed) {
+    button.textContent = "분석하며 영상 다시 읽기";
+    $("readyStatus").textContent = "빠른 검사가 중단되어 분석 단계에서 원본 헤더를 다시 확인합니다.";
   } else if (!hasProfile) {
     button.textContent = "장비 프로필을 선택하세요";
     $("readyStatus").textContent = "";

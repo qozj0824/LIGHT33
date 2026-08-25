@@ -4,6 +4,7 @@ import math
 import os
 import re
 import tempfile
+import warnings
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -309,6 +310,58 @@ def _normalise_stack_method(value: str | None) -> str | None:
     return "unknown"
 
 
+def _wcs_center_from_header(header: object, width: int, height: int) -> tuple[float | None, float | None]:
+    """Evaluate the image center from a small, standards-only WCS header.
+
+    Several observatory FITS files (notably older ESO products) contain hundreds
+    of non-standard instrument cards. Passing that entire header to ``WCS`` makes
+    Astropy repair and warn about every unrelated card, which can turn a preview
+    request into a multi-minute operation. Only celestial WCS cards are needed to
+    locate the image center, so copy those into a compact header first.
+    """
+    try:
+        from astropy.io import fits
+        from astropy.wcs import WCS
+    except ImportError:  # pragma: no cover
+        return None, None
+
+    ctype1 = _header_text(header, ["CTYPE1"])
+    ctype2 = _header_text(header, ["CTYPE2"])
+    if not ctype1 or not ctype2:
+        return None, None
+    compact = fits.Header()
+    compact["NAXIS"] = 2
+    compact["NAXIS1"] = int(width)
+    compact["NAXIS2"] = int(height)
+    text_keys = ("CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2", "RADESYS", "RADECSYS")
+    numeric_keys = (
+        "CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2",
+        "CROTA1", "CROTA2", "EQUINOX", "LONPOLE", "LATPOLE",
+        "CD1_1", "CD1_2", "CD2_1", "CD2_2",
+        "PC1_1", "PC1_2", "PC2_1", "PC2_2",
+    )
+    for key in text_keys:
+        text_value = _header_text(header, [key])
+        if text_value:
+            compact[key] = text_value
+    for key in numeric_keys:
+        numeric_value = _header_float(header, [key], positive=False)
+        if numeric_value is not None:
+            compact[key] = numeric_value
+    try:
+        # RADECSYS is an old alias. Keeping the original value is useful, but its
+        # deprecation warning is not actionable for an uploaded science frame.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            wcs = WCS(compact, relax=True)
+            if not wcs.has_celestial:
+                return None, None
+            center = wcs.celestial.pixel_to_world((width - 1) / 2.0, (height - 1) / 2.0)
+        return float(center.ra.deg) % 360.0, float(center.dec.deg)
+    except Exception:
+        return None, None
+
+
 def _load_fits(path: Path) -> ImageFrame:
     try:
         from astropy.io import fits
@@ -352,18 +405,9 @@ def _load_fits(path: Path) -> ImageFrame:
             header,
             ["SATURATE", "SATURLEV", "ADCMAX", "WHITELEV"],
         )
-        wcs_center_ra_deg = None
-        wcs_center_dec_deg = None
-        try:
-            from astropy.wcs import WCS
-            wcs = WCS(header)
-            if wcs.has_celestial:
-                center = wcs.celestial.pixel_to_world((arr.shape[1] - 1) / 2.0, (arr.shape[0] - 1) / 2.0)
-                wcs_center_ra_deg = float(center.ra.deg) % 360.0
-                wcs_center_dec_deg = float(center.dec.deg)
-        except Exception:
-            wcs_center_ra_deg = None
-            wcs_center_dec_deg = None
+        wcs_center_ra_deg, wcs_center_dec_deg = _wcs_center_from_header(
+            header, int(arr.shape[1]), int(arr.shape[0])
+        )
         site_latitude = _header_float(header, ["SITELAT", "LAT-OBS", "OBSGEO-B"], positive=False)
         site_longitude = _header_float(header, ["SITELONG", "SITELON", "LONG-OBS", "LON-OBS", "OBSGEO-L"], positive=False)
         site_height_m = _header_float(header, ["SITEELEV", "ALT-OBS", "ELEVATIO", "OBSGEO-H"], positive=False)
@@ -963,6 +1007,7 @@ def infer_intensity_domain(
     frame: ImageFrame,
     requested_clip_adu: float | None,
     safety_fraction: float,
+    sample_max_pixels: int | None = None,
 ) -> IntensityDomain:
     raw = (
         frame.saturation_intensity
@@ -971,13 +1016,19 @@ def infer_intensity_domain(
         if frame.raw_intensity is not None
         else frame.intensity
     )
-    values = raw[np.isfinite(raw)]
+    sampled = raw
+    if sample_max_pixels is not None and sample_max_pixels > 0 and raw.size > sample_max_pixels:
+        step = max(1, int(math.ceil(math.sqrt(raw.size / sample_max_pixels))))
+        sampled = raw[::step, ::step]
+    values = sampled[np.isfinite(sampled)]
     if values.size == 0:
         raise ValueError("ADU 범위를 판정할 유효 픽셀이 없습니다.")
-    observed_min = float(np.min(values))
+    # Min/max are cheap reductions and remain exact; median/p99.9 may use the
+    # deterministic inspection sample to avoid a full-size temporary array.
+    observed_min = float(np.nanmin(raw))
     observed_median = float(np.median(values))
     observed_p999 = float(np.percentile(values, 99.9))
-    observed_max = float(np.max(values))
+    observed_max = float(np.nanmax(raw))
     rendered = frame.metadata.source_type == "rendered"
     warnings: list[str] = []
     source = "unknown"

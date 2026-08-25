@@ -14,6 +14,7 @@ def assess_image_input(
     *,
     role: str,
     fisheye: FisheyeConfig | None = None,
+    sample_max_pixels: int | None = None,
 ) -> dict[str, Any]:
     """Return a non-fatal, machine-readable input quality assessment.
 
@@ -27,10 +28,16 @@ def assess_image_input(
     checks: dict[str, Any] = {}
     metadata = frame.metadata
     array = np.asarray(frame.intensity)
+    sample = array
+    sample_step = 1
+    if sample_max_pixels is not None and sample_max_pixels > 0 and array.size > sample_max_pixels:
+        sample_step = max(1, int(math.ceil(math.sqrt(array.size / sample_max_pixels))))
+        sample = array[::sample_step, ::sample_step]
 
-    finite = np.isfinite(array)
-    finite_fraction = float(np.mean(finite)) if array.size else 0.0
+    finite = np.isfinite(sample)
+    finite_fraction = float(np.mean(finite)) if sample.size else 0.0
     checks["finite_fraction"] = finite_fraction
+    checks["inspection_sample_step"] = sample_step
     checks["shape"] = [int(metadata.height), int(metadata.width)]
     checks["source_type"] = metadata.source_type
     if array.ndim != 2 or min(array.shape, default=0) < 32:
@@ -40,7 +47,7 @@ def assess_image_input(
     elif finite_fraction < 0.999:
         warnings.append("일부 NaN/Inf 픽셀은 자동 제외합니다.")
 
-    finite_values = np.asarray(array[finite], dtype=np.float64)
+    finite_values = np.asarray(sample[finite], dtype=np.float64)
     if finite_values.size:
         p01, p50, p99 = np.percentile(finite_values, [1.0, 50.0, 99.0])
         checks.update({"p01": float(p01), "median": float(p50), "p99": float(p99)})

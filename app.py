@@ -330,6 +330,8 @@ async def inspect_image(
     sensor_clip_adu: Annotated[float | None, Form()] = None,
     safety: Annotated[float, Form()] = 0.80,
 ) -> JSONResponse:
+    inspect_started = time.perf_counter()
+    request_id = f"inspect_{uuid.uuid4().hex[:12]}"
     _cleanup_old_jobs(max_age_hours=12.0)
     safe_role = role if role in {"allsky", "scope", "image"} else "image"
     token = uuid.uuid4().hex[:24]
@@ -337,12 +339,20 @@ async def inspect_image(
     budget = UploadBudget(MAX_REQUEST_BYTES)
     try:
         path = await _save_upload(file, job_dir, safe_role, budget)
+        upload_done = time.perf_counter()
         frame = await run_in_threadpool(load_image, path)
+        decode_done = time.perf_counter()
         _validate_pixels(frame.metadata.width, frame.metadata.height)
         domain = None
         inspect_warnings: list[str] = []
         try:
-            domain = await run_in_threadpool(infer_intensity_domain, frame, sensor_clip_adu, safety)
+            domain = await run_in_threadpool(
+                infer_intensity_domain,
+                frame,
+                sensor_clip_adu,
+                safety,
+                1_000_000,
+            )
         except Exception as exc:
             # Metadata/preview are still useful even when detector-domain inference is not.
             inspect_warnings.append(f"ADU 범위 판정 생략: {type(exc).__name__}: {str(exc)[:180]}")
@@ -379,8 +389,9 @@ async def inspect_image(
                 }
             except Exception:
                 suggested_rois = None
+        metadata_payload = asdict(frame.metadata)
         response_payload = {
-            "metadata": asdict(frame.metadata),
+            "metadata": metadata_payload,
             "capture_time_utc": image_observation_time_utc(frame.metadata.date_obs, frame.metadata.source_type),
             "domain": asdict(domain) if domain is not None else None,
             "preview_url": preview_url,
@@ -405,6 +416,7 @@ async def inspect_image(
             frame,
             role=safe_role,
             fisheye=fisheye,
+            sample_max_pixels=1_000_000,
         )
         response_payload["assessment"] = assessment
         response_payload["warnings"] = list(dict.fromkeys(
@@ -414,6 +426,26 @@ async def inspect_image(
         # Render instance from accumulating image memory between inspections.
         del frame
         _release_memory()
+        elapsed = time.perf_counter() - inspect_started
+        response_payload["inspection_timing_sec"] = {
+            "upload": round(upload_done - inspect_started, 3),
+            "decode_and_header": round(decode_done - upload_done, 3),
+            "postprocess": round(time.perf_counter() - decode_done, 3),
+            "total": round(elapsed, 3),
+        }
+        LOGGER.info(
+            "image_inspect_completed request_id=%s role=%s filename=%r exposure_sec=%s "
+            "width=%s height=%s upload_sec=%.3f decode_sec=%.3f total_sec=%.3f",
+            request_id,
+            safe_role,
+            file.filename,
+            metadata_payload.get("exposure_sec"),
+            metadata_payload.get("width"),
+            metadata_payload.get("height"),
+            upload_done - inspect_started,
+            decode_done - upload_done,
+            elapsed,
+        )
         return JSONResponse(response_payload)
     except HTTPException:
         shutil.rmtree(job_dir, ignore_errors=True)
@@ -421,6 +453,15 @@ async def inspect_image(
     except Exception as exc:
         shutil.rmtree(job_dir, ignore_errors=True)
         message = str(exc).strip().replace("\n", " ")[:240]
+        LOGGER.warning(
+            "image_inspect_failed request_id=%s role=%s filename=%r elapsed_sec=%.3f error=%s detail=%r",
+            request_id,
+            safe_role,
+            file.filename,
+            time.perf_counter() - inspect_started,
+            type(exc).__name__,
+            message,
+        )
         raise HTTPException(
             status_code=400,
             detail=f"영상을 읽을 수 없습니다: {type(exc).__name__}{(': ' + message) if message else ''}",
@@ -492,7 +533,10 @@ def equipment_profiles() -> dict[str, object]:
 @app.get("/api/equipment/profiles/{profile_id}")
 def equipment_profile_detail(profile_id: str) -> dict[str, object]:
     try:
-        return load_profile(PROFILE_ROOT, profile_id).to_dict()
+        payload = load_profile(PROFILE_ROOT, profile_id).to_dict()
+        payload["scope_preview_url"] = _profile_preview_url(profile_id, "scope")
+        payload["allsky_preview_url"] = _profile_preview_url(profile_id, "allsky")
+        return payload
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -510,7 +554,7 @@ async def equipment_profile_preview(profile_id: str, role: str) -> FileResponse:
     directory = PROFILE_ROOT / profile_id
     preview_path = directory / f"preview_{role}.png"
     try:
-        if (not preview_path.exists()) or preview_path.stat().st_mtime < source.stat().st_mtime:
+        if not preview_path.exists():
             frame = await run_in_threadpool(load_image, source)
             _validate_pixels(frame.metadata.width, frame.metadata.height)
             await run_in_threadpool(save_scope_preview, frame.intensity, preview_path)
@@ -655,7 +699,10 @@ async def equipment_profile_create(
                 allsky_calibration=allsky_cal,
                 result_root=RESULT_ROOT,
             )
-        return JSONResponse(profile.to_dict())
+        payload = profile.to_dict()
+        payload["scope_preview_url"] = _profile_preview_url(profile.profile_id, "scope")
+        payload["allsky_preview_url"] = _profile_preview_url(profile.profile_id, "allsky")
+        return JSONResponse(payload)
     except HTTPException:
         raise
     except ValueError as exc:
