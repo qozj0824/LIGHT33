@@ -17,7 +17,7 @@ from .io import apply_calibration, infer_intensity_domain, load_image, resolve_e
 from .models import AnalysisSettings, CalibrationSet
 from .photometry import analyze_saturation, measure_extended_source, measure_point_source, measure_stars
 from .sky import build_sky_map, prepare_sky_analysis_frame
-from .time_utils import image_observation_time_utc, observation_time_difference_minutes
+from .time_utils import image_observation_time_utc, observation_time_difference_minutes, parse_observation_datetime
 
 
 PROFILE_SCHEMA_VERSION = 5
@@ -252,7 +252,10 @@ def _prepare_reference_target_for_capture(
                 height=float(site_height or 0.0) * u.m,
             )
             skycoord = SkyCoord(ra=float(ra) * u.deg, dec=float(dec) * u.deg, frame="icrs")
-            transformed = skycoord.transform_to(AltAz(obstime=Time(capture_time_utc), location=location))
+            capture_datetime = parse_observation_datetime(capture_time_utc, assume_utc_if_naive=True)
+            if capture_datetime is None:
+                raise ValueError("기준 영상 촬영시각을 UTC datetime으로 해석하지 못했습니다.")
+            transformed = skycoord.transform_to(AltAz(obstime=Time(capture_datetime), location=location))
             alt = float(transformed.alt.deg)
             az = float(transformed.az.deg) % 360.0
             if alt >= 0.0:
