@@ -1,4 +1,11 @@
-# NØXIS v35.1
+# NØXIS
+
+> **v35.7 Render memory fix:** 4k-class all-sky FITS frames (including ESO APICAM/ALPACA) are now reduced to an 600-pixel analysis grid before coordinate transforms and star masking. The final 72×18 sky grid remains strongly oversampled, while peak RAM during equipment-profile creation is substantially lower.
+
+ v35.1
+
+> **v35.6 APICAM support:** ESO APICAM FITS files now use a camera-specific 4096×4096 mirrored fisheye directional model instead of the Canon EOS R/Sigma 8 mm calibration. The bundled APICAM solution is intentionally planning-grade until independent hold-out/external validation is completed.
+
 
 **방향별 하늘 배경과 저장된 장비 프로필을 이용한 천체 촬영 계획 프로그램**
 

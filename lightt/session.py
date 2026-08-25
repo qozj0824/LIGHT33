@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import math
 import uuid
@@ -15,7 +16,7 @@ from .geometry import select_fisheye_config, validate_fisheye_directional_calibr
 from .io import apply_calibration, load_image
 from .models import AnalysisSettings, CalibrationSet, ImageMetadata
 from .planning import _safe_round_down
-from .sky import build_sky_map
+from .sky import build_sky_map, prepare_sky_analysis_frame
 from .visualization import save_exposure_snr_curve
 from .time_utils import observation_time_difference_minutes
 
@@ -512,13 +513,14 @@ def run_session_analysis(
             "선택 대상은 행성·달·혜성 등 태양계 천체로 분류됩니다. 보고서의 심우주 대상 신호/SNR 검증 범위를 벗어나므로 결과를 계획용으로 낮춥니다."
         )
     allsky_original = load_image(allsky_path)
+    allsky_metadata = allsky_original.metadata
     time_difference_min, time_notes = _time_alignment(
         target_time_utc=target.get("observation_time_utc"),
-        allsky_date_obs=allsky_original.metadata.date_obs,
-        allsky_source_type=allsky_original.metadata.source_type,
+        allsky_date_obs=allsky_metadata.date_obs,
+        allsky_source_type=allsky_metadata.source_type,
     )
     warnings.extend(time_notes)
-    exposure = allsky_exposure_sec or allsky_original.metadata.exposure_sec
+    exposure = allsky_exposure_sec or allsky_metadata.exposure_sec
     if exposure is None or exposure <= 0:
         raise ValueError("전천 영상의 노출시간을 헤더에서 읽지 못했습니다. 전천 노출시간을 입력하세요.")
     allsky_calibration = allsky_calibration or CalibrationSet()
@@ -530,14 +532,14 @@ def run_session_analysis(
     if isinstance(allsky_cal_report.get("warnings"), list):
         warnings.extend(str(item) for item in allsky_cal_report["warnings"])
 
-    if allsky_original.metadata.source_type == "raw" or bool(allsky_cal_report.get("offset_removed")):
+    if allsky_metadata.source_type == "raw" or bool(allsky_cal_report.get("offset_removed")):
         current_allsky_offset = 0.0
         allsky_offset_known = True
     elif allsky_bias_offset_adu is not None and math.isfinite(allsky_bias_offset_adu):
         current_allsky_offset = float(allsky_bias_offset_adu)
         allsky_offset_known = True
-    elif allsky_original.metadata.offset_setting is not None:
-        current_allsky_offset = float(allsky_original.metadata.offset_setting)
+    elif allsky_metadata.offset_setting is not None:
+        current_allsky_offset = float(allsky_metadata.offset_setting)
         allsky_offset_known = True
     else:
         current_allsky_offset = 0.0
@@ -559,14 +561,18 @@ def run_session_analysis(
     )
     fisheye = select_fisheye_config(
         project_root,
-        camera_name=allsky_original.metadata.camera,
-        filename=allsky_original.metadata.filename,
-        width=allsky_original.metadata.width,
-        height=allsky_original.metadata.height,
+        camera_name=allsky_metadata.camera,
+        filename=allsky_metadata.filename,
+        width=allsky_metadata.width,
+        height=allsky_metadata.height,
     )
     fisheye_errors = validate_fisheye_directional_calibration(fisheye)
+    compact_allsky_frame = prepare_sky_analysis_frame(allsky_frame)
+    del allsky_frame
+    del allsky_original
+    gc.collect()
     sky = build_sky_map(
-        allsky_frame,
+        compact_allsky_frame,
         sky_settings,
         fisheye,
         result_dir,
@@ -585,7 +591,7 @@ def run_session_analysis(
         corrected_target_background,
         corrected_sky_median,
         exposure,
-        allsky_original.metadata,
+        allsky_metadata,
         current_flat_applied=bool(allsky_cal_report.get("flat_frames")),
     )
     warnings.extend(bg_warnings)
@@ -757,14 +763,14 @@ def run_session_analysis(
         "warnings": list(dict.fromkeys(warnings)),
         "diagnostics": {
             "fisheye_validation_errors": fisheye_errors,
-            "allsky_metadata": asdict(allsky_original.metadata),
+            "allsky_metadata": asdict(allsky_metadata),
             "allsky_calibration": allsky_cal_report,
             "observation_context": {
                 "stellarium_time_utc": target.get("observation_time_utc"),
                 "stellarium_time_local": target.get("observation_time_local"),
                 "stellarium_latitude": target.get("latitude"),
                 "stellarium_longitude": target.get("longitude"),
-                "allsky_date_obs": allsky_original.metadata.date_obs,
+                "allsky_date_obs": allsky_metadata.date_obs,
                 "time_difference_min": time_difference_min,
             },
         },

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import math
 import shutil
@@ -15,7 +16,7 @@ from .geometry import select_fisheye_config, validate_fisheye_directional_calibr
 from .io import apply_calibration, infer_intensity_domain, load_image, resolve_exposure
 from .models import AnalysisSettings, CalibrationSet
 from .photometry import analyze_saturation, measure_extended_source, measure_point_source, measure_stars
-from .sky import build_sky_map
+from .sky import build_sky_map, prepare_sky_analysis_frame
 from .time_utils import image_observation_time_utc, observation_time_difference_minutes
 
 
@@ -585,8 +586,19 @@ def create_equipment_profile(
                 fisheye_errors = validate_fisheye_directional_calibration(fisheye)
                 map_dir = directory / "reference_allsky_analysis"
                 map_dir.mkdir(exist_ok=True)
+
+                # The 4k APICAM frame is ~64 MiB as float32.  Geometry needs several
+                # temporary coordinate arrays, so keeping the full detector frame alive
+                # here can push small Render workers over their memory limit.  Build the
+                # exact same low-resolution working frame up front, preserve detector
+                # coordinate scaling, then release the 4k arrays before map generation.
+                allsky_source_type = allsky_original.metadata.source_type
+                compact_allsky_frame = prepare_sky_analysis_frame(allsky_frame)
+                del allsky_frame
+                del allsky_original
+                gc.collect()
                 sky = build_sky_map(
-                    allsky_frame,
+                    compact_allsky_frame,
                     allsky_settings,
                     fisheye,
                     map_dir,
@@ -598,7 +610,7 @@ def create_equipment_profile(
                         c_sys = float(bg_adu_per_pix_sec / allsky_rate)
                         quantitative_sources = (
                             scope_original.metadata.source_type != "rendered"
-                            and allsky_original.metadata.source_type != "rendered"
+                            and allsky_source_type != "rendered"
                             and scope_offset_known
                             and allsky_offset_known
                         )

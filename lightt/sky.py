@@ -20,7 +20,18 @@ from .plotting import plot_text
 
 
 
-def _decimate(image: np.ndarray, max_dim: int = 1200) -> tuple[np.ndarray, float, float]:
+def _decimate(image: np.ndarray, max_dim: int | None = None) -> tuple[np.ndarray, float, float]:
+    """Downsample the all-sky frame before any geometry/star-mask work.
+
+    Large 4k all-sky FITS frames can otherwise exceed the memory available on
+    small Render instances because the coordinate transform temporarily needs
+    several floating-point arrays.  The final sky map is only 72x18 cells, so
+    a 600-pixel working grid still heavily oversamples every cell while
+    cutting peak memory substantially.  Smaller inputs keep the historical
+    1200-pixel working size.
+    """
+    if max_dim is None:
+        max_dim = 600 if image.size >= 8_000_000 else 1200
     height, width = image.shape
     scale = max(height / max_dim, width / max_dim, 1.0)
     if scale <= 1:
@@ -30,6 +41,26 @@ def _decimate(image: np.ndarray, max_dim: int = 1200) -> tuple[np.ndarray, float
     reduced = ndimage.zoom(image, (out_h / height, out_w / width), order=1, prefilter=False)
     return reduced, width / out_w, height / out_h
 
+
+
+def prepare_sky_analysis_frame(frame: ImageFrame, max_dim: int | None = None) -> ImageFrame:
+    """Return a compact all-sky frame with detector-coordinate scaling preserved.
+
+    ``build_sky_map`` only needs the downsampled intensity plane.  Creating this
+    compact frame before the geometry step lets callers release the original
+    4k FITS array, which is important on memory-constrained Render workers.
+    """
+    reduced, sx, sy = _decimate(frame.intensity, max_dim=max_dim)
+    compact = np.asarray(reduced, dtype=np.float32)
+    return ImageFrame(
+        intensity=compact,
+        metadata=frame.metadata,
+        coordinate_scale_x=float(frame.coordinate_scale_x) * float(sx),
+        coordinate_scale_y=float(frame.coordinate_scale_y) * float(sy),
+        photometric_area_multiplier=(
+            float(frame.photometric_area_multiplier) * float(sx) * float(sy)
+        ),
+    )
 
 
 def _star_mask(image: np.ndarray) -> tuple[np.ndarray, str, int]:
@@ -51,7 +82,6 @@ def _star_mask(image: np.ndarray) -> tuple[np.ndarray, str, int]:
         finder = DAOStarFinder(fwhm=3.0, threshold=5.5 * sigma, exclude_border=True)
         sources = finder(residual - stats.median)
         if sources is not None and len(sources):
-            yy, xx = np.indices(image.shape)
             peaks = np.asarray(sources["peak"], dtype=float) if "peak" in sources.colnames else np.ones(len(sources))
             peak_ref = max(float(np.nanmedian(peaks[peaks > 0])) if np.any(peaks > 0) else 1.0, 1e-9)
             for row, peak in zip(sources, peaks, strict=False):
@@ -61,8 +91,7 @@ def _star_mask(image: np.ndarray) -> tuple[np.ndarray, str, int]:
                 radius = 4.0 + 2.0 * brightness_factor
                 x0, x1 = max(0, int(x - radius - 1)), min(image.shape[1], int(x + radius + 2))
                 y0, y1 = max(0, int(y - radius - 1)), min(image.shape[0], int(y + radius + 2))
-                local_x = xx[y0:y1, x0:x1]
-                local_y = yy[y0:y1, x0:x1]
+                local_y, local_x = np.ogrid[y0:y1, x0:x1]
                 mask[y0:y1, x0:x1] |= (local_x - x) ** 2 + (local_y - y) ** 2 <= radius**2
             if np.mean(mask) <= 0.40:
                 return mask, "DAOStarFinder", int(len(sources))
