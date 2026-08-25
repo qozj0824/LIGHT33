@@ -726,50 +726,18 @@ pre { max-height: 580px; overflow: auto; margin: 0; padding: 11px; background: #
   --sidebar-w: 76px;
 }
 
-/* Wordmark: clean text with the pastel Saturn ring only inside the Ø position. */
+/* Rounded vector wordmark: the Ø is a ringed planet, not a letter with an eye-like dot. */
 .brand {
-  display: inline-flex;
-  align-items: center;
-  gap: .17em;
-  margin: 0;
-  font-size: 1.46rem;
-  letter-spacing: .19em;
-  font-weight: 800;
-}
-.brand > span:last-child { margin-right: -.19em; }
-.brand-planet {
-  position: relative;
-  width: 1.06em;
-  height: 1.06em;
-  display: inline-grid;
-  place-items: center;
-  margin: 0 .02em;
-}
-.brand-orb {
-  position: relative;
-  z-index: 2;
   display: block;
-  line-height: 1;
-  letter-spacing: 0;
-  color: #f7f6fb;
+  margin: 0;
+  width: 158px;
+  line-height: 0;
+  user-select: none;
 }
-.brand-planet::after {
-  content: "";
-  position: absolute;
-  z-index: 3;
-  left: 50%;
-  top: 50%;
-  width: 1.36em;
-  height: .53em;
-  transform: translate(-50%, -50%) rotate(-25deg);
-  border: 2px solid transparent;
-  border-radius: 50%;
-  background: linear-gradient(100deg, #ffb8ac 5%, #c5a9ff 48%, #8aa6ff 95%) border-box;
-  -webkit-mask: linear-gradient(#000 0 0) padding-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
-  filter: saturate(.9);
+.brand-wordmark {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
 /* Denser desktop-tool proportions. */

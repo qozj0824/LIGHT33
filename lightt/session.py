@@ -19,7 +19,12 @@ from .geometry import (
 )
 from .io import apply_calibration, load_image
 from .models import AnalysisSettings, CalibrationSet, ImageMetadata
-from .planning import _safe_round_down
+from .planning import (
+    _exposure_efficiency,
+    _exposure_efficiency_time,
+    _friendly_round_up,
+    _safe_round_down,
+)
 from .sky import build_sky_map, prepare_sky_analysis_frame
 from .visualization import save_exposure_snr_curve
 from .time_utils import observation_time_difference_minutes
@@ -390,70 +395,31 @@ def _snr_for_exposure(
     return signal / math.sqrt(variance) if variance > 0 else 0.0
 
 
-def _exposure_efficiency_time(
+def _signal_model_uncertainty_fraction(
+    source: str,
+    profile: EquipmentProfile,
     *,
-    background_rate_e_per_pix: float,
-    dark_current_e_per_pix_sec: float,
-    read_noise_e: float,
-    frame_overhead_sec: float,
-    target_efficiency: float = 0.90,
-) -> tuple[float, float]:
-    """Return the shortest exposure meeting a read-noise/overhead efficiency target.
-
-    Relative to an infinitely long exposure, the useful-information rate is
-    approximated by
-
-        1 / ((1 + tau_read / t) * (1 + overhead / t)),
-
-    where tau_read = RN^2 / (sky + dark).  Solving the quadratic avoids the
-    previous two bad extremes: rounding just below the sky-limited floor, and
-    treating the user-entered maximum as the recommendation itself.
-    """
-    linear_rate = max(background_rate_e_per_pix + dark_current_e_per_pix_sec, 1e-12)
-    read_noise_time = max(read_noise_e, 0.0) ** 2 / linear_rate
-    overhead = max(frame_overhead_sec, 0.0)
-    efficiency = min(0.99, max(0.50, target_efficiency))
-    loss = 1.0 / efficiency - 1.0
-    linear = read_noise_time + overhead
-    discriminant = linear**2 + 4.0 * loss * read_noise_time * overhead
-    exposure = (linear + math.sqrt(max(discriminant, 0.0))) / max(2.0 * loss, 1e-12)
-    return float(exposure), float(read_noise_time)
-
-
-def _exposure_efficiency(
-    exposure_sec: float,
-    *,
-    read_noise_time_sec: float,
-    frame_overhead_sec: float,
+    limited_target_model: bool,
 ) -> float:
-    if exposure_sec <= 0:
+    """Assign a stated planning uncertainty from model provenance, not output fit."""
+    if source == "unavailable":
         return 0.0
-    return float(
-        1.0
-        / (
-            (1.0 + max(read_noise_time_sec, 0.0) / exposure_sec)
-            * (1.0 + max(frame_overhead_sec, 0.0) / exposure_sec)
-        )
-    )
-
-
-def _friendly_round_up(seconds: float, minimum: float) -> float:
-    """Round an efficiency floor up to a practical camera-friendly value."""
-    if seconds <= minimum:
-        return float(minimum)
-    if seconds < 2:
-        step = 0.1
-    elif seconds < 10:
-        step = 0.5
-    elif seconds < 30:
-        step = 1.0
-    elif seconds < 120:
-        step = 5.0
-    elif seconds < 300:
-        step = 10.0
-    else:
-        step = 30.0
-    return float(max(minimum, math.ceil(seconds / step - 1e-12) * step))
+    uncertainty = 0.15
+    if source == "manual_surface_brightness":
+        uncertainty = 0.20
+    if source.startswith("integrated_mag_plus_size"):
+        uncertainty = max(uncertainty, 0.40)
+    if "filter_mismatch" in source:
+        uncertainty = max(uncertainty, 0.50)
+    if "narrowband" in source:
+        uncertainty = max(uncertainty, 0.75)
+    if profile.zero_point_quality == "approximate":
+        uncertainty = max(uncertainty, 0.30)
+    elif profile.zero_point_quality not in {"good"}:
+        uncertainty = max(uncertainty, 0.50)
+    if limited_target_model:
+        uncertainty = max(uncertainty, 0.75)
+    return float(min(uncertainty, 0.95))
 
 
 def _build_plan(
@@ -472,17 +438,31 @@ def _build_plan(
     stack_efficiency: float,
     max_frames: int,
     frame_overhead_sec: float,
+    background_uncertainty_fraction: float = 0.0,
+    signal_uncertainty_fraction: float = 0.0,
 ) -> dict[str, Any]:
     warnings: list[str] = []
     gain = profile.gain_e_per_adu
     bg_rate_e = max(background_rate_adu_per_pix, 0.0) * gain
+    background_uncertainty_fraction = min(0.90, max(0.0, background_uncertainty_fraction))
+    signal_uncertainty_fraction = min(0.95, max(0.0, signal_uncertainty_fraction))
+    bg_rate_e_low = bg_rate_e * (1.0 - background_uncertainty_fraction)
+    bg_rate_e_high = bg_rate_e * (1.0 + background_uncertainty_fraction)
     dark = max(profile.dark_current_e_per_pix_sec, 0.0)
     rn = max(profile.read_noise_e, 0.0)
-    sky_lower = 5.0 * rn**2 / max(bg_rate_e + dark, 1e-12)
+    # Low sky is the adverse case for read-noise efficiency; high sky is the
+    # adverse case for detector-background and saturation headroom.
+    sky_lower = 5.0 * rn**2 / max(bg_rate_e_low + dark, 1e-12)
+    sky_lower_bright = 5.0 * rn**2 / max(bg_rate_e_high + dark, 1e-12)
 
     upper_candidates: list[tuple[str, float]] = [("user_max", max_sub_exposure_sec)]
     if tracking_limit_sec > 0:
         upper_candidates.append(("tracking", tracking_limit_sec))
+    else:
+        warnings.append(
+            "추적 상한을 입력하지 않아 마운트 주기오차·극축정렬·바람·시잉은 "
+            "강제 상한에 포함하지 않았습니다."
+        )
 
     fullwell_e: float | None = None
     background_upper: float | None = None
@@ -491,12 +471,12 @@ def _build_plan(
     if profile.sensor_clip_adu is not None and profile.sensor_clip_adu > profile.bias_offset_adu:
         fullwell_e = (profile.sensor_clip_adu - profile.bias_offset_adu) * gain
         bg_threshold_e = fullwell_e * background_limit_fraction
-        if bg_rate_e + dark > 0:
-            background_upper = bg_threshold_e / (bg_rate_e + dark)
+        if bg_rate_e_high + dark > 0:
+            background_upper = bg_threshold_e / (bg_rate_e_high + dark)
             upper_candidates.append(("background", background_upper))
         if profile.reference_peak_e_per_sec is not None and profile.reference_peak_e_per_sec > 0:
             safe_e = fullwell_e * saturation_safety_fraction
-            rate = profile.reference_peak_e_per_sec + bg_rate_e + dark
+            rate = profile.reference_peak_e_per_sec + bg_rate_e_high + dark
             saturation_upper = safe_e / rate
             warnings.append(
                 "장비 프로필의 기준 영상에서 측정한 대표 별 포화시간은 과거 시야의 밝기 진단값입니다. "
@@ -512,9 +492,13 @@ def _build_plan(
             and profile.reference_psf_peak_fraction is not None
             and profile.reference_psf_peak_fraction > 0
         ):
-            target_peak_rate = target_signal_rate_e * profile.reference_psf_peak_fraction
+            target_peak_rate = (
+                target_signal_rate_e
+                * (1.0 + signal_uncertainty_fraction)
+                * profile.reference_psf_peak_fraction
+            )
             target_saturation_upper = (fullwell_e * saturation_safety_fraction) / max(
-                target_peak_rate + bg_rate_e + dark, 1e-12
+                target_peak_rate + bg_rate_e_high + dark, 1e-12
             )
             upper_candidates.append(("target_saturation", target_saturation_upper))
         elif target["target_mode"] == "point":
@@ -530,13 +514,26 @@ def _build_plan(
     hard_upper_constraint, practical_upper = min(upper_candidates, key=lambda item: item[1])
     exposure_efficiency_target = 0.90
     efficiency_lower, read_noise_time = _exposure_efficiency_time(
-        background_rate_e_per_pix=bg_rate_e,
+        background_rate_e_per_pix=bg_rate_e_low,
         dark_current_e_per_pix_sec=dark,
         read_noise_e=rn,
         frame_overhead_sec=frame_overhead_sec,
         target_efficiency=exposure_efficiency_target,
     )
     efficiency_goal = max(sky_lower, efficiency_lower)
+    efficiency_lower_bright, _ = _exposure_efficiency_time(
+        background_rate_e_per_pix=bg_rate_e_high,
+        dark_current_e_per_pix_sec=dark,
+        read_noise_e=rn,
+        frame_overhead_sec=frame_overhead_sec,
+        target_efficiency=exposure_efficiency_target,
+    )
+    recommendation_range_lower = min(
+        practical_upper,
+        _friendly_round_up(
+            max(sky_lower_bright, efficiency_lower_bright), min_sub_exposure_sec
+        ),
+    )
     constraint_inputs = {
         "target_snr": float(target_snr),
         "min_sub_exposure_sec": float(min_sub_exposure_sec),
@@ -548,6 +545,8 @@ def _build_plan(
         "max_frames": int(max_frames),
         "frame_overhead_sec": float(frame_overhead_sec),
         "effective_pixels": int(effective_pixels),
+        "background_uncertainty_fraction": float(background_uncertainty_fraction),
+        "signal_uncertainty_fraction": float(signal_uncertainty_fraction),
     }
     if practical_upper < min_sub_exposure_sec:
         return {
@@ -609,6 +608,10 @@ def _build_plan(
             precision = 10.0 if selection_target < 100.0 else 1.0
             recommended = math.floor(selection_target * precision) / precision
     recommended = min(practical_upper, max(min_sub_exposure_sec, recommended))
+    recommendation_range = [
+        float(min(recommendation_range_lower, recommended)),
+        float(max(recommendation_range_lower, recommended)),
+    ]
     sky_limited_feasible = sky_lower <= practical_upper
     sky_limited_achieved = recommended >= sky_lower
     efficiency_target_achieved = recommended >= efficiency_lower
@@ -645,6 +648,7 @@ def _build_plan(
     achievable_snr_at_max_frames: float | None = None
     total: float | None = None
     elapsed: float | None = None
+    required_frames_range: list[int] | None = None
     if target_signal_rate_e is not None and target_signal_rate_e > 0:
         snr_sub = _snr_for_exposure(
             recommended,
@@ -659,6 +663,23 @@ def _build_plan(
                 1,
                 int(math.ceil((target_snr / max(snr_sub * stack_efficiency, 1e-12)) ** 2)),
             )
+            low_signal = target_signal_rate_e * (1.0 - signal_uncertainty_fraction)
+            high_signal = target_signal_rate_e * (1.0 + signal_uncertainty_fraction)
+            optimistic_snr = _snr_for_exposure(
+                recommended, high_signal, bg_rate_e_low, dark, rn, effective_pixels
+            )
+            pessimistic_snr = _snr_for_exposure(
+                recommended, low_signal, bg_rate_e_high, dark, rn, effective_pixels
+            )
+            optimistic_frames = max(
+                1,
+                int(math.ceil((target_snr / max(optimistic_snr * stack_efficiency, 1e-12)) ** 2)),
+            )
+            pessimistic_frames = max(
+                optimistic_frames,
+                int(math.ceil((target_snr / max(pessimistic_snr * stack_efficiency, 1e-12)) ** 2)),
+            )
+            required_frames_range = [optimistic_frames, pessimistic_frames]
             frames = required_frames_unbounded
             achievable_snr_at_max_frames = snr_sub * stack_efficiency * math.sqrt(max_frames)
             if required_frames_unbounded > max_frames:
@@ -693,6 +714,7 @@ def _build_plan(
         "predicted_snr_per_sub": None if snr_sub is None else float(snr_sub),
         "frames": frames,
         "required_frames_unbounded": required_frames_unbounded,
+        "required_frames_range": required_frames_range,
         "max_frames_exceeded": max_frames_exceeded,
         "achievable_snr_at_max_frames": achievable_snr_at_max_frames,
         "total_integration_sec": None if total is None else float(total),
@@ -711,10 +733,18 @@ def _build_plan(
         "sky_limited_achieved": bool(sky_limited_achieved),
         "exposure_efficiency_target": exposure_efficiency_target,
         "exposure_efficiency_lower_sec": float(efficiency_lower),
+        "recommended_sub_exposure_range_sec": recommendation_range,
         "exposure_efficiency_at_recommendation": efficiency_at_recommendation,
         "read_noise_time_constant_sec": float(read_noise_time),
         "reference_star_advisory_applied": reference_advisory_applied,
         "constraint_inputs": constraint_inputs,
+        "physics_model": {
+            "snr_variance": "S*t + n_pix*(B*t + D*t + RN^2)",
+            "information_efficiency": "1 / ((1 + RN^2/((B+D)*t)) * (1 + overhead/t))",
+            "efficiency_target": exposure_efficiency_target,
+            "selection_policy": "shortest practical exposure satisfying physical lower bounds, then hard safety caps",
+            "uncertainty_policy": "low sky for read-noise lower bound; high sky and high signal for saturation limits",
+        },
         "confidence": confidence,
         "warnings": warnings,
     }
@@ -863,19 +893,27 @@ def run_session_analysis(
         flat_applied=bool(allsky_cal_report.get("flat_frames")),
     )
     warnings.extend(sky.notes)
-    directional_lookup_used = fisheye.orientation_confidence not in {"unknown", "low"}
-    if directional_lookup_used and sky.target_background_adu is None:
-        raise ValueError("선택 천체 방향의 신뢰 가능한 전천 배경값을 계산하지 못했습니다.")
-
-    target_background_raw = (
-        float(sky.target_background_adu)
-        if directional_lookup_used and sky.target_background_adu is not None
-        else float(sky.sky_median_adu)
+    orientation_available = fisheye.orientation_confidence not in {"unknown", "low"}
+    directional_lookup_used = bool(
+        orientation_available
+        and sky.target_background_source in {"directional_interpolation", "nearby_reliable_cells"}
     )
-    if not directional_lookup_used:
+    if orientation_available and sky.target_background_adu is not None:
+        target_background_raw = float(sky.target_background_adu)
+        selected_background_source = sky.target_background_source
+    else:
+        target_background_raw = float(sky.sky_median_adu)
+        selected_background_source = "allsky_median_orientation_fallback"
+    if not orientation_available:
         warnings.append(
             "이 전천 카메라의 북쪽 방향 보정값을 확인하지 못해 임의 방향 셀을 사용하지 않고 "
             "검증 가능한 전천 중앙 배경값으로 자동 대체했습니다. 카메라별 어안 보정 전까지 방향 지도는 진단용입니다."
+        )
+    elif sky.target_background_fallback_used:
+        warnings.append(
+            f"목표 방향의 엄격 보간 조건을 충족하지 못해 "
+            f"{sky.target_background_source} 단계로 배경값을 대체했습니다. "
+            "값은 유지하되 불확실성과 결과 제한을 함께 올립니다."
         )
     corrected_target_background = max(target_background_raw - current_allsky_offset, 0.0)
     corrected_sky_median = max(float(sky.sky_median_adu) - current_allsky_offset, 0.0)
@@ -891,7 +929,7 @@ def run_session_analysis(
     )
     warnings.extend(bg_warnings)
     background_uncertainty_fraction = 0.0
-    if directional_lookup_used and sky.target_uncertainty_adu is not None and target_background_raw > 0:
+    if orientation_available and sky.target_uncertainty_adu is not None and target_background_raw > 0:
         background_uncertainty_fraction = max(
             background_uncertainty_fraction,
             min(float(sky.target_uncertainty_adu) / target_background_raw, 1.0),
@@ -904,11 +942,11 @@ def run_session_analysis(
         background_uncertainty_fraction = max(background_uncertainty_fraction, 0.15)
     if not allsky_offset_known:
         background_uncertainty_fraction = max(background_uncertainty_fraction, 0.10)
-    background_rate_for_plan = bg_rate_adu * (1.0 + background_uncertainty_fraction)
+    background_rate_for_plan = bg_rate_adu
     if background_uncertainty_fraction > 0:
         warnings.append(
-            f"전천 보정과 배경 환산의 불확실성을 반영해 노출 계획에는 중앙 추정값보다 "
-            f"{background_uncertainty_fraction:.0%} 높은 보수적 배경률을 사용했습니다."
+            f"전천 보정과 배경 환산의 불확실성 {background_uncertainty_fraction:.0%}를 분리해 "
+            "어두운 배경 경계는 읽기잡음 하한에, 밝은 배경 경계는 포화 상한에 적용했습니다."
         )
 
     # Airmass is a geometric observing-condition value and does not depend on
@@ -925,6 +963,16 @@ def run_session_analysis(
         manual_surface_brightness_mag_arcsec2,
     )
     warnings.extend(signal_warnings)
+    signal_uncertainty_fraction = _signal_model_uncertainty_fraction(
+        signal_source,
+        profile,
+        limited_target_model=limited_target_model,
+    )
+    if signal_rate is not None and signal_uncertainty_fraction > 0:
+        warnings.append(
+            f"대상 신호 모델의 근거({signal_source})에 따라 신호율 불확실성을 "
+            f"±{signal_uncertainty_fraction:.0%}로 표시하고 필요 장수 범위에 전파했습니다."
+        )
     if target["target_mode"] == "point":
         n_pix = max(1, profile.reference_aperture_pixels or effective_pixels)
     else:
@@ -945,6 +993,8 @@ def run_session_analysis(
         stack_efficiency=stack_efficiency,
         max_frames=max_frames,
         frame_overhead_sec=frame_overhead_sec,
+        background_uncertainty_fraction=background_uncertainty_fraction,
+        signal_uncertainty_fraction=signal_uncertainty_fraction,
     )
     warnings.extend(plan["warnings"])
 
@@ -985,10 +1035,16 @@ def run_session_analysis(
     confidence = plan["confidence"]
     validity = "quantitative_candidate"
     validity_reasons: list[str] = []
-    if not directional_lookup_used:
+    if not orientation_available:
         validity = "planning_only"
         validity_reasons.append(
             "카메라별 북쪽 방향 보정이 없어 목표 방향을 추측하지 않고 전천 중앙 배경으로 자동 대체했습니다."
+        )
+    elif sky.target_background_fallback_used:
+        validity = "planning_only"
+        validity_reasons.append(
+            f"목표 지점의 엄격 보간 조건을 충족하지 못해 "
+            f"{sky.target_background_source} 배경 대체값과 확대된 불확실성을 사용했습니다."
         )
     elif fisheye_errors:
         validity = "planning_only"
@@ -1065,6 +1121,7 @@ def run_session_analysis(
             "allsky_exposure_sec": exposure,
             "target_allsky_background_adu_raw": sky.target_background_adu,
             "selected_background_adu_raw": target_background_raw,
+            "selected_background_source": selected_background_source,
             "directional_lookup_used": directional_lookup_used,
             "allsky_median_adu_raw": sky.sky_median_adu,
             "allsky_offset_adu": current_allsky_offset,
@@ -1078,12 +1135,23 @@ def run_session_analysis(
             "uncertainty_fraction_for_plan": background_uncertainty_fraction,
             "planning_background_adu_per_sec_per_pixel": background_rate_for_plan,
             "planning_background_e_per_sec_per_pixel": background_rate_for_plan * profile.gain_e_per_adu,
+            "background_rate_lower_e_per_sec_per_pixel": (
+                background_rate_for_plan
+                * profile.gain_e_per_adu
+                * (1.0 - background_uncertainty_fraction)
+            ),
+            "background_rate_upper_e_per_sec_per_pixel": (
+                background_rate_for_plan
+                * profile.gain_e_per_adu
+                * (1.0 + background_uncertainty_fraction)
+            ),
         },
         "target_signal_model": {
             "source": signal_source,
             "signal_e_per_sec": signal_rate,
             "signal_e_per_sec_per_pixel": signal_per_pixel,
             "effective_pixels": n_pix,
+            "uncertainty_fraction": signal_uncertainty_fraction,
             **signal_diag,
         },
         "plan": plan,

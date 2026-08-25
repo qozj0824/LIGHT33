@@ -110,6 +110,68 @@ def _safe_round_down(seconds: float, minimum: float) -> float:
     return float(max(minimum, math.floor(seconds / step + 1e-12) * step))
 
 
+def _friendly_round_up(seconds: float, minimum: float) -> float:
+    """Round a physical lower bound up without violating it."""
+    if seconds <= minimum:
+        return float(minimum)
+    if seconds < 2:
+        step = 0.1
+    elif seconds < 10:
+        step = 0.5
+    elif seconds < 30:
+        step = 1.0
+    elif seconds < 120:
+        step = 5.0
+    elif seconds < 300:
+        step = 10.0
+    else:
+        step = 30.0
+    return float(max(minimum, math.ceil(seconds / step - 1e-12) * step))
+
+
+def _exposure_efficiency_time(
+    *,
+    background_rate_e_per_pix: float,
+    dark_current_e_per_pix_sec: float,
+    read_noise_e: float,
+    frame_overhead_sec: float,
+    target_efficiency: float = 0.90,
+) -> tuple[float, float]:
+    """Shortest sub exposure meeting the information-rate efficiency target.
+
+    For background-limited planning the relative useful-information rate is
+    ``1 / ((1 + tau_read/t) * (1 + overhead/t))`` with
+    ``tau_read = RN² / (sky + dark)``. The same detector-noise equation is used
+    for every camera, target, and upload; no reference result is fitted here.
+    """
+    linear_rate = max(background_rate_e_per_pix + dark_current_e_per_pix_sec, 1e-12)
+    read_noise_time = max(read_noise_e, 0.0) ** 2 / linear_rate
+    overhead = max(frame_overhead_sec, 0.0)
+    efficiency = min(0.99, max(0.50, target_efficiency))
+    loss = 1.0 / efficiency - 1.0
+    linear = read_noise_time + overhead
+    discriminant = linear**2 + 4.0 * loss * read_noise_time * overhead
+    exposure = (linear + math.sqrt(max(discriminant, 0.0))) / max(2.0 * loss, 1e-12)
+    return float(exposure), float(read_noise_time)
+
+
+def _exposure_efficiency(
+    exposure_sec: float,
+    *,
+    read_noise_time_sec: float,
+    frame_overhead_sec: float,
+) -> float:
+    if exposure_sec <= 0:
+        return 0.0
+    return float(
+        1.0
+        / (
+            (1.0 + max(read_noise_time_sec, 0.0) / exposure_sec)
+            * (1.0 + max(frame_overhead_sec, 0.0) / exposure_sec)
+        )
+    )
+
+
 
 def _invalid_plan(
     *,
@@ -244,15 +306,40 @@ def build_exposure_plan(
             practical_upper=practical_upper,
         )
 
-    recommended_raw = practical_upper * 0.90
-    if sky_lower is not None:
-        if sky_lower <= practical_upper:
-            recommended_raw = max(recommended_raw, sky_lower)
-        else:
-            warnings.append(
-                "별/추적 상한이 읽기잡음 효율 하한보다 짧아, 효율보다 밝은 별 보존을 우선했습니다."
-            )
-    recommended = min(_safe_round_down(min(recommended_raw, practical_upper), settings.min_sub_exposure_sec), practical_upper)
+    efficiency_target = 0.90
+    efficiency_lower, read_noise_time = _exposure_efficiency_time(
+        background_rate_e_per_pix=calibrated_bg_rate_e_pix,
+        dark_current_e_per_pix_sec=0.0,
+        read_noise_e=settings.read_noise_e,
+        frame_overhead_sec=settings.frame_overhead_sec,
+        target_efficiency=efficiency_target,
+    )
+    physical_lower = max(sky_lower or settings.min_sub_exposure_sec, efficiency_lower)
+    if physical_lower <= practical_upper:
+        recommended = min(
+            practical_upper,
+            _friendly_round_up(physical_lower, settings.min_sub_exposure_sec),
+        )
+        limiting_constraint = "exposure_efficiency_target"
+    else:
+        recommended = min(
+            practical_upper,
+            _safe_round_down(practical_upper, settings.min_sub_exposure_sec),
+        )
+        warnings.append(
+            "포화·추적·사용자 상한이 읽기잡음과 프레임 오버헤드를 합친 "
+            "90% 정보효율 하한보다 짧아 안전 상한을 우선했습니다."
+        )
+    achieved_efficiency = _exposure_efficiency(
+        recommended,
+        read_noise_time_sec=read_noise_time,
+        frame_overhead_sec=settings.frame_overhead_sec,
+    )
+    if achieved_efficiency >= efficiency_target:
+        warnings.append(
+            f"권장 노출은 배경·다크·읽기잡음·프레임 오버헤드 모델의 "
+            f"장노출 대비 정보효율 {achieved_efficiency:.1%}를 만족하는 가장 짧은 실용값입니다."
+        )
     if recommended <= 0:
         return _invalid_plan(
             measurement=measurement,

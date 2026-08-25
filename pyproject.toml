@@ -14,5 +14,5 @@ check_untyped_defs = true
 exclude = "(.venv|results|uploads)"
 
 [[tool.mypy.overrides]]
-module = ["scipy", "scipy.*", "astropy", "astropy.*"]
+module = ["scipy", "scipy.*", "astropy", "astropy.*", "photutils", "photutils.*"]
 ignore_missing_imports = true

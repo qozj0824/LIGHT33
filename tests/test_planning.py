@@ -68,8 +68,11 @@ def test_realistic_16bit_plan_is_not_point_one_second() -> None:
     plan = build_exposure_plan(measurement(), saturation(), domain(), settings, 180)
     assert plan.status == "ok"
     assert plan.recommended_sub_exposure_sec is not None
-    assert 100 <= plan.recommended_sub_exposure_sec <= 170
-    assert plan.frames is not None and plan.frames < 30
+    # The recommendation is now the shortest sub reaching the detector-noise /
+    # overhead efficiency target. It must not track 90% of the arbitrary cap.
+    assert 20 <= plan.recommended_sub_exposure_sec <= 40
+    assert plan.frames is not None and plan.frames < 60
+    assert any("정보효율" in warning for warning in plan.warnings)
     assert plan.confidence == "medium"
     assert any("Gain·읽기잡음" in warning for warning in plan.warnings)
 

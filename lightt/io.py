@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import tempfile
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -85,7 +86,7 @@ def _header_float(header: object, keys: Iterable[str], *, positive: bool = True)
         if value is None:
             continue
         try:
-            number = float(value)
+            number = float(cast(Any, value))
         except (TypeError, ValueError):
             continue
         if math.isfinite(number) and (number > 0 if positive else True):
@@ -107,6 +108,190 @@ def _header_text(header: object, keys: Iterable[str]) -> str | None:
         if value not in (None, ""):
             return str(value).strip()
     return None
+
+
+def _header_value(header: object, key: str) -> object | None:
+    try:
+        return header.get(key)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+
+
+def _seconds_value(value: object, *, key_scale: float = 1.0) -> float | None:
+    """Parse an exposure value while preserving explicit units."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower().replace("µ", "u").replace("μ", "u")
+        if not text:
+            return None
+        fraction = re.match(
+            r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*/\s*"
+            r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))",
+            text,
+        )
+        if fraction:
+            denominator = float(fraction.group(2))
+            if denominator == 0:
+                return None
+            number = float(fraction.group(1)) / denominator
+        else:
+            match = re.search(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", text)
+            if not match:
+                return None
+            number = float(match.group(0))
+        if re.search(r"(?:^|\s)(?:ms|msec|millisecond(?:s)?)(?:\s|$)", text):
+            scale = 1e-3
+        elif re.search(r"(?:^|\s)(?:us|usec|microsecond(?:s)?)(?:\s|$)", text):
+            scale = 1e-6
+        elif re.search(r"(?:^|\s)(?:ns|nsec|nanosecond(?:s)?)(?:\s|$)", text):
+            scale = 1e-9
+        else:
+            scale = key_scale
+    else:
+        try:
+            number = float(cast(Any, value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        scale = key_scale
+    seconds = number * scale
+    return float(seconds) if math.isfinite(seconds) and seconds > 0 else None
+
+
+def _fits_exposure_metadata(
+    header: object,
+) -> tuple[float | None, float | None, int | None, str | None, dict[str, Any]]:
+    """Resolve FITS integration time and retain competing header values.
+
+    ``exposure_sec`` is the integration represented by the image pixels. If a
+    detector sequence only provides DIT/NDIT, it is derived as DIT×NDIT. A
+    post-processing mean/median stack keeps per-frame EXPTIME and stores the
+    summed integration separately in ``effective_exposure_sec``.
+    """
+    specs = [
+        ("EXPTIME", "image", 1.0),
+        ("EXPOSURE", "image", 1.0),
+        ("EXP_TIME", "image", 1.0),
+        ("EXPTIME_MS", "image", 1e-3),
+        ("EXPOSURE_MS", "image", 1e-3),
+        ("EXPMS", "image", 1e-3),
+        ("EXPTIME_US", "image", 1e-6),
+        ("EXPOSURE_US", "image", 1e-6),
+        ("EXPUS", "image", 1e-6),
+        ("DIT", "detector_integration", 1.0),
+        ("ITIME", "detector_integration", 1.0),
+        ("INTTIME", "detector_integration", 1.0),
+        ("INT_TIME", "detector_integration", 1.0),
+        ("ESO DET DIT", "detector_integration", 1.0),
+        ("HIERARCH ESO DET DIT", "detector_integration", 1.0),
+        ("ESO DET SEQ1 DIT", "detector_integration", 1.0),
+        ("HIERARCH ESO DET SEQ1 DIT", "detector_integration", 1.0),
+        ("ONTIME", "total", 1.0),
+        ("LIVETIME", "total", 1.0),
+        ("TOTEXP", "total", 1.0),
+        ("TOTEXPT", "total", 1.0),
+        ("EXPTOTAL", "total", 1.0),
+    ]
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key, role, scale in specs:
+        canonical = key.removeprefix("HIERARCH ")
+        if canonical in seen:
+            continue
+        raw = _header_value(header, key)
+        seconds = _seconds_value(raw, key_scale=scale)
+        if seconds is None:
+            continue
+        seen.add(canonical)
+        candidates.append({"key": key, "role": role, "raw": str(raw), "seconds": seconds})
+
+    detector_count = _header_int(
+        header,
+        [
+            "NDIT", "ESO DET NDIT", "HIERARCH ESO DET NDIT",
+            "ESO DET SEQ1 NDIT", "HIERARCH ESO DET SEQ1 NDIT",
+        ],
+    )
+    if detector_count is not None and detector_count < 1:
+        detector_count = None
+    stack_count = _header_int(header, ["STACKCNT", "NCOMBINE"])
+    stack_method = _normalise_stack_method(
+        _header_text(header, ["COMBINE", "COMBMETH", "STACKMTH", "STACKING"])
+    )
+    by_role = {
+        role: [candidate for candidate in candidates if candidate["role"] == role]
+        for role in ("image", "detector_integration", "total")
+    }
+    selected: dict[str, Any] | None = None
+    selection_rule = "missing"
+    if by_role["image"]:
+        selected = by_role["image"][0]
+        selection_rule = "standard_image_exposure"
+    elif by_role["total"]:
+        selected = by_role["total"][0]
+        selection_rule = "explicit_total_exposure"
+    elif by_role["detector_integration"]:
+        selected = dict(by_role["detector_integration"][0])
+        if detector_count and detector_count > 1:
+            selected["seconds"] = float(selected["seconds"]) * detector_count
+            selected["key"] = f"{selected['key']} × NDIT"
+            selected["role"] = "derived_total"
+            selection_rule = "detector_integration_times_count"
+        else:
+            selection_rule = "single_detector_integration"
+
+    exposure = float(selected["seconds"]) if selected is not None else None
+    comparisons: list[dict[str, Any]] = []
+    conflicts: list[str] = []
+
+    def compare(label: str, value: float) -> None:
+        if exposure is None or value <= 0:
+            return
+        relative_difference = abs(value - exposure) / max(value, exposure, 1e-12)
+        comparisons.append({
+            "label": label,
+            "seconds": float(value),
+            "relative_difference": float(relative_difference),
+        })
+        if relative_difference > 0.02:
+            conflicts.append(
+                f"{label}={value:g}초가 선택값 {exposure:g}초와 {relative_difference:.1%} 다릅니다."
+            )
+
+    if by_role["detector_integration"]:
+        detector_total = float(by_role["detector_integration"][0]["seconds"])
+        if detector_count and detector_count > 1:
+            detector_total *= detector_count
+        compare("DIT×NDIT" if detector_count and detector_count > 1 else "DIT", detector_total)
+    if by_role["total"] and selection_rule != "explicit_total_exposure":
+        compare(str(by_role["total"][0]["key"]), float(by_role["total"][0]["seconds"]))
+    for duplicate in by_role["image"][1:]:
+        compare(str(duplicate["key"]), float(duplicate["seconds"]))
+
+    effective = None
+    if exposure is not None and stack_count and stack_count > 1 and stack_method in {"mean", "median"}:
+        effective = exposure * stack_count
+    elif exposure is not None and selection_rule == "detector_integration_times_count":
+        effective = exposure
+    confidence = "none"
+    if exposure is not None:
+        confidence = "low" if conflicts else (
+            "medium" if selection_rule.startswith("detector_") else "high"
+        )
+    provenance = {
+        "selected_seconds": exposure,
+        "selected_key": None if selected is None else selected["key"],
+        "selected_role": None if selected is None else selected["role"],
+        "selection_rule": selection_rule,
+        "confidence": confidence,
+        "candidates": candidates,
+        "comparisons": comparisons,
+        "conflicts": conflicts,
+        "detector_integration_count": detector_count,
+        "post_stack_count": stack_count,
+        "post_stack_method": stack_method,
+    }
+    return exposure, effective, stack_count, stack_method, provenance
 
 
 def _normalise_stack_method(value: str | None) -> str | None:
@@ -159,12 +344,9 @@ def _load_fits(path: Path) -> ImageFrame:
             if isinstance(bitpix, (int, np.integer)) and int(bitpix) > 0
             else None
         )
-        exposure = _header_float(header, ["EXPTIME", "EXPOSURE", "EXP_TIME", "ONTIME"])
-        stack_count = _header_int(header, ["STACKCNT", "NCOMBINE", "NFRAMES", "IMGCNT"])
-        stack_method = _normalise_stack_method(
-            _header_text(header, ["COMBINE", "COMBMETH", "STACKMTH", "IMAGETYP"])
+        exposure, effective, stack_count, stack_method, exposure_provenance = (
+            _fits_exposure_metadata(header)
         )
-        effective = exposure * stack_count if exposure and stack_count and stack_count > 1 else None
         arr = _finite_array(data)
         trusted_clip = _header_float(
             header,
@@ -229,6 +411,7 @@ def _load_fits(path: Path) -> ImageFrame:
                 "local_sidereal_time_sec": _header_float(
                     header, ["LST", "SIDTIME", "ST"], positive=False
                 ),
+                "exposure_provenance": exposure_provenance,
             },
         )
         return ImageFrame(
@@ -372,6 +555,16 @@ def _load_raw(path: Path) -> ImageFrame:
                 "black_levels": black_levels,
                 "cfa_pattern": letters.tolist(),
                 "iso_speed": iso,
+                "exposure_provenance": {
+                    "selected_seconds": exposure,
+                    "selected_key": "RAW metadata shutter" if exposure is not None else None,
+                    "selected_role": "image",
+                    "selection_rule": "raw_library_metadata" if exposure is not None else "missing",
+                    "confidence": "high" if exposure is not None else "none",
+                    "candidates": [],
+                    "comparisons": [],
+                    "conflicts": [],
+                },
             },
         )
         return ImageFrame(
@@ -413,7 +606,7 @@ def _load_rendered(path: Path) -> ImageFrame:
             exif = image.getexif()
             exposure_value = exif.get(33434)
             if exposure_value:
-                exposure = float(exposure_value)
+                exposure = _seconds_value(exposure_value)
             date_obs = str(exif.get(36867) or exif.get(306) or "") or None
             camera = " ".join(str(v) for v in [exif.get(271), exif.get(272)] if v).strip() or None
         except Exception:
@@ -431,7 +624,19 @@ def _load_rendered(path: Path) -> ImageFrame:
             camera=camera,
             data_min=float(np.min(arr)),
             data_max=float(np.max(arr)),
-            extra={"mode": original_mode},
+            extra={
+                "mode": original_mode,
+                "exposure_provenance": {
+                    "selected_seconds": exposure,
+                    "selected_key": "EXIF ExposureTime" if exposure is not None else None,
+                    "selected_role": "image",
+                    "selection_rule": "exif_exposure_time" if exposure is not None else "missing",
+                    "confidence": "high" if exposure is not None else "none",
+                    "candidates": [],
+                    "comparisons": [],
+                    "conflicts": [],
+                },
+            },
         )
         return ImageFrame(
             intensity=arr,

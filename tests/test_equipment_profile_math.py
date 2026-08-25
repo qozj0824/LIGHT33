@@ -235,6 +235,39 @@ def test_result7_fors2_600_second_cap_balances_at_100_seconds():
     assert result["limiting_constraint"] == "exposure_efficiency_target"
 
 
+def test_background_and_signal_uncertainty_are_propagated_not_fitted():
+    p = profile(
+        gain_e_per_adu=1.25,
+        read_noise_e=2.7,
+        dark_current_e_per_pix_sec=0.0,
+        reference_peak_e_per_sec=521.6843756931794,
+    )
+    result = _build_plan(
+        profile=p,
+        target={"target_mode": "extended"},
+        background_rate_adu_per_pix=0.5950065385655572,
+        target_signal_rate_e=11.030948845718818,
+        effective_pixels=100,
+        target_snr=150.0,
+        min_sub_exposure_sec=1.0,
+        max_sub_exposure_sec=600.0,
+        tracking_limit_sec=0.0,
+        background_limit_fraction=0.30,
+        saturation_safety_fraction=0.80,
+        stack_efficiency=0.90,
+        max_frames=2000,
+        frame_overhead_sec=2.0,
+        background_uncertainty_fraction=0.15,
+        signal_uncertainty_fraction=0.50,
+    )
+    assert result["recommended_sub_exposure_range_sec"] == [100.0, 120.0]
+    assert result["recommended_sub_exposure_sec"] == 120.0
+    assert result["required_frames_range"][0] < result["frames"] < result["required_frames_range"][1]
+    assert "RN^2" in result["physics_model"]["snr_variance"]
+    assert result["constraint_inputs"]["background_uncertainty_fraction"] == 0.15
+    assert result["constraint_inputs"]["signal_uncertainty_fraction"] == 0.50
+
+
 def test_friendly_rounding_never_crosses_reference_star_advisory():
     p = profile(reference_peak_e_per_sec=523.5)
     result = _build_plan(

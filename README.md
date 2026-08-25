@@ -1,6 +1,6 @@
 # NØXIS
 
-> **v36.1 balanced exposure selection:** The maximum single exposure is now treated strictly as a cap, not as the requested recommendation. NØXIS selects the shortest camera-friendly exposure that reaches 90% of the asymptotic read-noise/overhead efficiency, then applies background, tracking, target-saturation and reference-field advisory checks. The uploaded FORS2/APICAM result that incorrectly selected 600 s now selects 100 s.
+> **v36.2 process-level exposure model:** Recommendations are produced from the same SNR variance and read-noise/overhead information-efficiency equations for every input, not fitted to one FORS2/APICAM answer. Background uncertainty is propagated in opposite physical directions for read-noise and saturation constraints, signal-model uncertainty produces a required-frame range, and maximum exposure remains a hard cap. FITS/RAW/EXIF exposure provenance and conflicts are retained, missing target sky cells use explicit uncertainty-ranked fallbacks, the UI always displays sub-exposure in seconds, and the header uses a rounded vector Saturn wordmark.
 
 > **v36.0 data-independent robustness:** Unknown all-sky cameras no longer inherit the bundled Canon calibration. NØXIS detects a circular footprint only when supported by image evidence, estimates an outer-field pedestal only after uniformity/contrast checks, falls back to the all-sky median when north orientation is unknown, adapts the sky grid to small inputs, validates saved profiles and observing locations, and emits traceable Render log IDs for unexpected failures.
 
@@ -10,14 +10,14 @@
 > **v35.9 APICAM pedestal:** If an ESO APICAM FITS has no explicit Bias/offset calibration, NØXIS can estimate the same-frame bias+dark pedestal from the optically dark detector area outside the calibrated 180° image circle. The method is APICAM-specific, provenance is saved in JSON, and directional Csys quality remains planning until independent fisheye hold-out validation.
 > **v35.8 Render memory fix:** 4k-class all-sky FITS frames (including ESO APICAM/ALPACA) are now reduced to an 600-pixel analysis grid before coordinate transforms and star masking. The final 72×18 sky grid remains strongly oversampled, while peak RAM during equipment-profile creation is substantially lower.
 
- v36.1
+ v36.2
 
 > **v35.6 APICAM support:** ESO APICAM FITS files now use a camera-specific 4096×4096 mirrored fisheye directional model instead of the Canon EOS R/Sigma 8 mm calibration. The bundled APICAM solution is intentionally planning-grade until independent hold-out/external validation is completed.
 
 
 **방향별 하늘 배경과 저장된 장비 프로필을 이용한 천체 촬영 계획 프로그램**
 
-NØXIS v36.1은 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화·스택 계산 원리를 하나의 로컬 웹 프로그램으로 연결한 배포본입니다.
+NØXIS v36.2는 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화·스택 계산 원리를 하나의 로컬 웹 프로그램으로 연결한 배포본입니다.
 
 ## v34.2 핵심 수정
 

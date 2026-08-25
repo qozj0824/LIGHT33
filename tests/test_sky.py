@@ -36,6 +36,33 @@ def test_synthetic_sky_map_round_trip(tmp_path: Path) -> None:
     assert (tmp_path / "sky_background_distribution.png").exists()
     text = (tmp_path / "sky_background.tsv").read_text(encoding="utf-8")
     assert "nan" in text or "good" in text
+    assert result.target_background_source == "directional_interpolation"
+
+
+def test_missing_near_target_cells_fall_back_with_explicit_uncertainty(tmp_path: Path) -> None:
+    size = 500
+    yy, xx = np.indices((size, size))
+    radius = np.hypot(xx - (size - 1) / 2, yy - (size - 1) / 2)
+    image = 1000 + 0.3 * xx + 0.1 * yy
+    image[radius > size * 0.48] = 0
+    meta = ImageMetadata("fallback.fits", "fits", size, size, "float32", bit_depth=16)
+    frame = ImageFrame(image.astype(np.float32), meta, raw_intensity=image.astype(np.float32))
+    settings = AnalysisSettings(
+        current_exposure_sec=30,
+        az_bins=12,
+        alt_bins=6,
+        target_alt_deg=15,
+        target_az_deg=0,
+        minimum_sky_altitude_deg=15,
+    )
+    result = build_sky_map(frame, settings, FisheyeConfig(mode="auto_equidistant"), tmp_path)
+    assert result.target_background_adu is not None
+    assert result.target_background_fallback_used is True
+    assert result.target_background_source in {
+        "nearby_reliable_cells", "altitude_band_median", "allsky_median"
+    }
+    assert result.target_uncertainty_adu is not None
+    assert result.target_uncertainty_adu >= result.target_background_adu * 0.15
 
 
 def test_low_altitude_extreme_dark_obstruction_is_blocked(tmp_path: Path) -> None:

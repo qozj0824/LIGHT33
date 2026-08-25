@@ -302,6 +302,8 @@ class SkyMapSummary:
     good_fraction: float
     blocked_fraction: float
     map_label: str
+    target_background_source: str = "unavailable"
+    target_background_fallback_used: bool = False
     star_detection_method: str = "unknown"
     detected_star_count: int = 0
     star_mask_fraction: float = 0.0

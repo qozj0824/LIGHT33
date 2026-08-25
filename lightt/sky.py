@@ -421,6 +421,8 @@ def build_sky_map(
 
     interpolation_cells = [cell for cell in usable_cells if cell.reliability in {"good", "caution"}]
     target_background = target_factor = target_uncertainty = target_solid_angle = None
+    target_background_source = "unavailable"
+    target_background_fallback_used = False
     notes = [
         "이 지도는 광해만 분리한 지도가 아니라 관측 시점의 방향별 하늘 배경 ADU 지도입니다.",
         f"별 제거 방법: {star_detection_method} · 검출 후보 {detected_star_count:,}개 · 마스크 비율 {float(np.mean(star_mask))*100:.2f}%.",
@@ -470,8 +472,100 @@ def build_sky_map(
                 omega_values = np.array([pair[0] for pair in omega_pairs])
                 omega_weights = np.array([pair[1] for pair in omega_pairs])
                 target_solid_angle = float(np.sum(omega_values * omega_weights) / np.sum(omega_weights))
+            target_background_source = "directional_interpolation"
         else:
-            notes.append("목표 방향 7.5° 이내에 good/caution 셀이 2개 미만이라 방향값을 계산하지 않았습니다.")
+            notes.append("목표 방향 7.5° 이내에 good/caution 셀이 2개 미만이라 자동 대체 단계를 검사합니다.")
+
+    # A single missing interpolation cell must not make the same upload pass on
+    # one run and fail on another. Fall back in a fixed, quality-ranked order and
+    # widen the uncertainty instead of fabricating a precise directional value.
+    if target_background is None and interpolation_cells:
+        cell_az = np.array([cell.az_center_deg for cell in interpolation_cells])
+        cell_alt = np.array([cell.alt_center_deg for cell in interpolation_cells])
+        distances = _angular_distance(
+            cell_az, cell_alt, settings.target_az_deg, settings.target_alt_deg
+        )
+        nearby_indices = [int(i) for i in np.argsort(distances) if distances[int(i)] <= 15.0][:8]
+        if nearby_indices:
+            nearby = [interpolation_cells[i] for i in nearby_indices]
+            nearby_distances = distances[nearby_indices]
+            nearby_values = np.array(
+                [float(cell.background_adu) for cell in nearby if cell.background_adu is not None],
+                dtype=float,
+            )
+            reliability_weight = np.array(
+                [1.0 if cell.reliability == "good" else 0.55 for cell in nearby], dtype=float
+            )
+            weights_nearby = reliability_weight / np.maximum(nearby_distances, 1.0) ** 2
+            target_background = float(
+                np.sum(weights_nearby * nearby_values) / np.sum(weights_nearby)
+            )
+            scatter = float(np.sqrt(np.average(
+                (nearby_values - target_background) ** 2, weights=weights_nearby
+            ))) if len(nearby_values) > 1 else 0.0
+            measurement = float(np.sqrt(np.mean([
+                float(cell.standard_error_adu or 0.0) ** 2 for cell in nearby
+            ])))
+            target_uncertainty = max(
+                math.sqrt(scatter**2 + measurement**2),
+                abs(target_background) * 0.15,
+            )
+            target_factor = target_background / sky_median if sky_median > 0 else None
+            omega = [
+                float(cell.solid_angle_arcsec2)
+                for cell in nearby
+                if cell.solid_angle_arcsec2 is not None and cell.solid_angle_arcsec2 > 0
+            ]
+            target_solid_angle = float(np.median(omega)) if omega else None
+            target_background_source = "nearby_reliable_cells"
+            target_background_fallback_used = True
+            notes.append(
+                f"목표 7.5° 내 보간 셀이 부족해 15° 내 신뢰 셀 {len(nearby)}개로 "
+                "대체했고, 방향 불확실성을 최소 15%로 확대했습니다."
+            )
+
+    if target_background is None:
+        altitude_half_width = max(7.5, 90.0 / max(alt_bins, 1) * 1.5)
+        altitude_cells = [
+            cell for cell in usable_cells
+            if abs(cell.alt_center_deg - settings.target_alt_deg) <= altitude_half_width
+            and cell.background_adu is not None
+        ]
+        if len(altitude_cells) >= 3:
+            altitude_values = np.array(
+                [float(cell.background_adu) for cell in altitude_cells if cell.background_adu is not None],
+                dtype=float,
+            )
+            target_background = float(np.median(altitude_values))
+            robust_sigma = 1.4826 * float(
+                np.median(np.abs(altitude_values - target_background))
+            )
+            target_uncertainty = max(robust_sigma, abs(target_background) * 0.25)
+            target_factor = target_background / sky_median if sky_median > 0 else None
+            omega = [
+                float(cell.solid_angle_arcsec2)
+                for cell in altitude_cells
+                if cell.solid_angle_arcsec2 is not None and cell.solid_angle_arcsec2 > 0
+            ]
+            target_solid_angle = float(np.median(omega)) if omega else None
+            target_background_source = "altitude_band_median"
+            target_background_fallback_used = True
+            notes.append(
+                f"목표 근처 신뢰 셀이 없어 같은 고도대(±{altitude_half_width:.1f}°) "
+                f"{len(altitude_cells)}개 셀의 중앙값을 사용하고 불확실성을 최소 25%로 확대했습니다."
+            )
+
+    if target_background is None:
+        target_background = float(sky_median)
+        robust_sigma = 1.4826 * float(np.median(np.abs(backgrounds - sky_median)))
+        target_uncertainty = max(robust_sigma, abs(target_background) * 0.30)
+        target_factor = 1.0
+        target_background_source = "allsky_median"
+        target_background_fallback_used = True
+        notes.append(
+            "목표 방향과 고도대에 사용 가능한 셀이 없어 전천 중앙값을 사용하고 "
+            "배경 불확실성을 최소 30%로 낮춰 잡지 않았습니다."
+        )
 
     table_path = result_dir / "sky_background.tsv"
     with table_path.open("w", encoding="utf-8", newline="") as handle:
@@ -689,6 +783,8 @@ def build_sky_map(
         good_fraction=good / len(cells),
         blocked_fraction=blocked / len(cells),
         map_label=map_label,
+        target_background_source=target_background_source,
+        target_background_fallback_used=target_background_fallback_used,
         star_detection_method=star_detection_method,
         detected_star_count=detected_star_count,
         star_mask_fraction=float(np.mean(star_mask)),

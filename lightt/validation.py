@@ -52,6 +52,23 @@ def assess_image_input(
         recoveries.append("방향별 상대 밝기와 미리보기 분석만 유지")
     if metadata.exposure_sec is None:
         actions.append("노출시간 메타데이터가 없습니다. 분석 전에 노출시간을 입력해야 합니다.")
+    exposure_provenance = metadata.extra.get("exposure_provenance")
+    if isinstance(exposure_provenance, dict):
+        checks["exposure_provenance"] = exposure_provenance
+        exposure_confidence = str(exposure_provenance.get("confidence") or "none")
+        conflicts = [str(item) for item in (exposure_provenance.get("conflicts") or [])]
+        if conflicts:
+            warnings.append(
+                "노출시간 헤더 항목들이 서로 다릅니다: " + " ".join(conflicts[:3])
+            )
+            recoveries.append(
+                "표준 EXPTIME/EXPOSURE를 우선 선택하고 충돌 내역을 결과에 보존"
+            )
+        elif exposure_confidence == "medium":
+            warnings.append(
+                "노출시간을 표준 EXPTIME 대신 detector DIT/NDIT 관계에서 유도했습니다."
+            )
+            recoveries.append("DIT×NDIT로 영상의 총 적분시간을 계산")
     if not metadata.date_obs:
         warnings.append("촬영시각이 없어 Stellarium과 영상 시각 일치를 자동 검증할 수 없습니다.")
     if not metadata.camera:

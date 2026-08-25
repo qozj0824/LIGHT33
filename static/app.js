@@ -57,6 +57,13 @@ function formatSeconds(value) {
   return `${formatNumber(seconds / 3600, 2)}시간`;
 }
 
+function formatSubExposureSeconds(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
+  const seconds = Number(value);
+  const digits = seconds < 10 ? 1 : (Number.isInteger(seconds) ? 0 : 1);
+  return `${formatNumber(seconds, digits)}초`;
+}
+
 function assessmentLabel(assessment) {
   return {
     ready: "자동 판정 완료",
@@ -223,10 +230,15 @@ function dateToJulianDay(iso) {
 
 function renderMetadata(metadata) {
   if (!metadata) return "메타데이터 없음";
+  const exposure = metadata.extra?.exposure_provenance || {};
+  const exposureConfidence = { high: "헤더 확실", medium: "헤더 유도", low: "헤더 충돌" }[exposure.confidence];
+  const exposureKey = exposure.selected_key ? String(exposure.selected_key) : null;
   const items = [
     `${metadata.width} × ${metadata.height}`,
     metadata.source_type?.toUpperCase(),
-    metadata.exposure_sec ? `노출 ${metadata.exposure_sec}s` : "노출시간 미확인",
+    Number(metadata.exposure_sec) > 0 ? `노출 ${formatSubExposureSeconds(metadata.exposure_sec)}` : "노출시간 미확인",
+    exposureKey,
+    exposureConfidence,
     metadata.camera || null,
   ].filter(Boolean);
   return items.join(" · ");
@@ -1000,11 +1012,19 @@ function renderResult(result) {
   $("resultTargetName").textContent = result.target?.name || "분석 결과";
   $("resultDetail").textContent = `${result.equipment_profile?.name || "장비 프로필"} · ${result.target?.object_type || "천체"} · 단일노출 ${exposureSelectionLabel(plan.selection_basis)} · 신호 모델 ${result.target_signal_model?.source || "없음"}`;
   $("confidenceBox").textContent = `신뢰도 ${confidenceLabel(result.confidence)} · ${validityLabel(result.validity)}`;
-  $("mSub").textContent = plan.recommended_sub_exposure_sec == null ? "확정 불가" : formatSeconds(plan.recommended_sub_exposure_sec);
+  $("mSub").textContent = plan.recommended_sub_exposure_sec == null ? "확정 불가" : formatSubExposureSeconds(plan.recommended_sub_exposure_sec);
+  const subRange = plan.recommended_sub_exposure_range_sec;
+  $("mSub").title = Array.isArray(subRange) && subRange.length === 2
+    ? `배경 불확실성 범위 ${formatSubExposureSeconds(subRange[0])} – ${formatSubExposureSeconds(subRange[1])}`
+    : "";
   $("mSnr").textContent = formatNumber(plan.predicted_snr_per_sub, 2);
   $("mFrames").textContent = plan.frames == null
     ? (plan.max_frames_exceeded ? `필요 ${formatNumber(plan.required_frames_unbounded, 0)}장` : "—")
     : `${formatNumber(plan.frames, 0)}장`;
+  const frameRange = plan.required_frames_range;
+  $("mFrames").title = Array.isArray(frameRange) && frameRange.length === 2
+    ? `신호·배경 불확실성 범위 ${formatNumber(frameRange[0], 0)} – ${formatNumber(frameRange[1], 0)}장`
+    : "";
   $("mTotal").textContent = formatSeconds(plan.total_integration_sec);
   $("mAltitude").textContent = `${formatNumber(result.target?.alt_deg, 2)}°`;
   $("mAirmass").textContent = result.target?.airmass == null ? "—" : formatNumber(result.target.airmass, 5);
