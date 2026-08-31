@@ -39,6 +39,7 @@ const ARTIFACT_INFO = {
   sky_distribution: ["배경 분포", ""],
   allsky_preview: ["전천 영상", ""],
   exposure_snr_curve: ["노출시간–SNR", ""],
+  target_structure_profile: ["천체 밝기 구역", "공개 survey의 절대 광량이 아니라 상대 구조만 사용"],
 };
 
 function valueOrNull(id) {
@@ -1054,8 +1055,13 @@ function populateGallery(containerId, keys, artifacts) {
 function flattenObject(object, prefix = "", output = []) {
   Object.entries(object || {}).forEach(([key, value]) => {
     const path = prefix ? `${prefix}.${key}` : key;
-    if (value && typeof value === "object" && !Array.isArray(value)) flattenObject(value, path, output);
-    else output.push([path, Array.isArray(value) ? value.join(", ") : value]);
+    if (Array.isArray(value) && value.every((item) => item && typeof item === "object")) {
+      value.forEach((item, index) => flattenObject(item, `${path}[${index}]`, output));
+    } else if (value && typeof value === "object" && !Array.isArray(value)) {
+      flattenObject(value, path, output);
+    } else {
+      output.push([path, Array.isArray(value) ? value.join(", ") : value]);
+    }
   });
   return output;
 }
@@ -1076,7 +1082,10 @@ function renderResult(result) {
   const plan = result.plan || {};
   $("validityBadge").textContent = validityLabel(result.validity);
   $("resultTargetName").textContent = result.target?.name || "분석 결과";
-  $("resultDetail").textContent = `${result.equipment_profile?.name || "장비 프로필"} · ${result.target?.object_type || "천체"} · 단일노출 ${exposureSelectionLabel(plan.selection_basis)} · 신호 모델 ${result.target_signal_model?.source || "없음"}`;
+  const structureLabel = result.target_structure_model?.status === "ok"
+    ? `구조 ${confidenceLabel(result.target_structure_model?.confidence)}`
+    : "구조 fallback";
+  $("resultDetail").textContent = `${result.equipment_profile?.name || "장비 프로필"} · ${result.target?.object_type || "천체"} · 단일노출 ${exposureSelectionLabel(plan.selection_basis)} · ${structureLabel} · 신호 모델 ${result.target_signal_model?.source || "없음"}`;
   $("confidenceBox").textContent = `신뢰도 ${confidenceLabel(result.confidence)} · ${validityLabel(result.validity)}`;
   $("mSub").textContent = plan.recommended_sub_exposure_sec == null ? "확정 불가" : formatSubExposureSeconds(plan.recommended_sub_exposure_sec);
   const subRange = plan.recommended_sub_exposure_range_sec;
@@ -1084,6 +1093,9 @@ function renderResult(result) {
     ? `배경 불확실성 범위 ${formatSubExposureSeconds(subRange[0])} – ${formatSubExposureSeconds(subRange[1])}`
     : "";
   $("mSnr").textContent = formatNumber(plan.predicted_snr_per_sub, 2);
+  $("mSnr").title = plan.structure_aware_integration
+    ? `희미한 구조 ${formatNumber(plan.science_zone_percentile, 0)}백분위 기준 · 평균 대상 SNR ${formatNumber(plan.predicted_snr_per_sub_mean, 2)}`
+    : "평균 대상 신호 기준";
   $("mFrames").textContent = plan.frames == null
     ? (plan.max_frames_exceeded ? `필요 ${formatNumber(plan.required_frames_unbounded, 0)}장` : "—")
     : `${formatNumber(plan.frames, 0)}장`;
@@ -1098,12 +1110,14 @@ function renderResult(result) {
   renderList($("validityReasons"), result.validity_reasons || []);
   renderList($("warningList"), result.warnings || []);
   const artifacts = result.artifacts || {};
-  populateGallery("overviewGallery", ["sky_polar_map", "exposure_snr_curve", "allsky_coordinate_overlay", "sky_reliability"], artifacts);
+  populateGallery("overviewGallery", ["sky_polar_map", "target_structure_profile", "exposure_snr_curve", "allsky_coordinate_overlay", "sky_reliability"], artifacts);
   populateGallery("skyGallery", ["sky_polar_map", "allsky_coordinate_overlay", "sky_relative_map", "sky_reliability", "sky_altitude_profiles", "sky_map", "sky_distribution", "allsky_preview"], artifacts);
   const tables = $("diagnosticTables"); tables.innerHTML = "";
   tables.append(
     diagnosticTable("노출 계획", result.plan),
     diagnosticTable("대상 신호 모델", result.target_signal_model),
+    diagnosticTable("천체 밝기 구조 모델", result.target_structure_model),
+    diagnosticTable("실제 촬영 데이터 prior", result.exposure_evidence_prior),
     diagnosticTable("하늘 배경 환산", result.background_model),
     diagnosticTable("장비 프로필", result.equipment_profile),
     diagnosticTable("전천지도 요약", {
@@ -1119,7 +1133,7 @@ function renderResult(result) {
   );
   $("rawJson").textContent = JSON.stringify(result, null, 2);
   const downloads = $("downloadLinks"); downloads.innerHTML = "";
-  [["sky_table", "전천지도 TSV"], ["result_json", "결과 JSON"]].forEach(([key, label]) => {
+  [["sky_table", "전천지도 TSV"], ["target_structure_reference_fits", "천체 구조 참조 FITS"], ["result_json", "결과 JSON"]].forEach(([key, label]) => {
     if (!artifacts[key]) return; const a = document.createElement("a"); a.href = artifacts[key]; a.download = ""; a.className = "secondary small"; a.textContent = label; downloads.appendChild(a);
   });
   document.querySelectorAll(".tab-content").forEach((panel) => panel.classList.remove("active"));

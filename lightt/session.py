@@ -28,6 +28,8 @@ from .planning import (
 from .sky import build_sky_map, prepare_sky_analysis_frame
 from .visualization import save_exposure_snr_curve
 from .time_utils import observation_time_difference_minutes
+from .reference_sky import fetch_target_structure, survey_for_filter
+from .evidence import exposure_evidence_prior
 
 
 def _finite(value: Any) -> float | None:
@@ -441,6 +443,7 @@ def _build_plan(
     background_uncertainty_fraction: float = 0.0,
     signal_uncertainty_fraction: float = 0.0,
     target_signal_rate_e_per_pixel: float | None = None,
+    target_structure_model: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     warnings: list[str] = []
     gain = profile.gain_e_per_adu
@@ -506,11 +509,22 @@ def _build_plan(
             warnings.append("점광원 대상의 PSF peak 비율이 없어 대상 자체의 포화 상한은 별도로 계산하지 못했습니다.")
         elif target_signal_rate_e_per_pixel is not None and target_signal_rate_e_per_pixel > 0:
             _, limited_extended_target = _target_scope_flags(target)
-            # Integrated magnitude + angular area yields a mean surface brightness.
-            # A modest structure factor protects bright planetary bands, lunar
-            # terrain and compact cores without pretending that a catalogue value
-            # is a resolved surface map.
-            structure_factor = 2.0 if limited_extended_target else 1.5
+            structure_factor = None
+            structure_status = (target_structure_model or {}).get("status")
+            structure_confidence = (target_structure_model or {}).get("confidence")
+            structure_value = (target_structure_model or {}).get("bright_structure_factor")
+            if structure_status == "ok" and isinstance(structure_value, (int, float)) and structure_value > 0:
+                structure_factor = float(structure_value)
+                warnings.append(
+                    f"공개 참조 영상의 상대 밝기 분포에서 밝은 구조 계수 {structure_factor:.2f}×를 측정해 "
+                    "확산 대상의 픽셀 포화 상한에 적용했습니다. 참조 영상의 절대 ADU/flux는 사용하지 않았습니다."
+                )
+            if structure_factor is None:
+                structure_factor = 2.0 if limited_extended_target else 1.5
+                warnings.append(
+                    "대상 구조 참조 영상을 사용할 수 없어 평균 표면밝기에 보수적 구조 안전계수를 적용했습니다. "
+                    "밝은 핵이 있는 대상은 시험 촬영으로 포화를 추가 확인하세요."
+                )
             target_peak_rate = (
                 target_signal_rate_e_per_pixel
                 * (1.0 + signal_uncertainty_fraction)
@@ -520,10 +534,6 @@ def _build_plan(
                 target_peak_rate + bg_rate_e_high + dark, 1e-12
             )
             upper_candidates.append(("target_saturation", target_saturation_upper))
-            warnings.append(
-                "확산 대상은 평균 표면밝기에 국소 구조 안전계수를 적용해 대상 자체의 픽셀 포화 상한을 계산했습니다. "
-                "행성·달의 세부 무늬나 성운의 밝은 핵은 시험 촬영으로 추가 확인하세요."
-            )
         else:
             warnings.append(
                 "확산천체의 국소 최고 표면밝기와 오늘 시야의 가장 밝은 별은 카탈로그 통합등급만으로 "
@@ -573,6 +583,10 @@ def _build_plan(
             if target_signal_rate_e_per_pixel is None
             else float(target_signal_rate_e_per_pixel)
         ),
+        "target_structure_status": (target_structure_model or {}).get("status"),
+        "target_structure_confidence": (target_structure_model or {}).get("confidence"),
+        "target_structure_faint_factor": (target_structure_model or {}).get("faint_structure_factor"),
+        "target_structure_bright_factor": (target_structure_model or {}).get("bright_structure_factor"),
     }
     if practical_upper < min_sub_exposure_sec:
         return {
@@ -670,30 +684,67 @@ def _build_plan(
         frame_overhead_sec=frame_overhead_sec,
     )
 
+    snr_sub_mean: float | None = None
+    snr_sub_science: float | None = None
     snr_sub: float | None = None
     frames: int | None = None
     required_frames_unbounded: int | None = None
+    required_frames_mean: int | None = None
     max_frames_exceeded = False
     achievable_snr_at_max_frames: float | None = None
     total: float | None = None
     elapsed: float | None = None
     required_frames_range: list[int] | None = None
-    if target_signal_rate_e is not None and target_signal_rate_e > 0:
-        snr_sub = _snr_for_exposure(
-            recommended,
-            target_signal_rate_e,
-            bg_rate_e,
-            dark,
-            rn,
-            effective_pixels,
+    science_signal_rate_e: float | None = target_signal_rate_e
+    structure_aware_integration = False
+    science_zone_factor = 1.0
+    science_zone_percentile: float | None = None
+    structure_confidence = (target_structure_model or {}).get("confidence")
+    faint_factor = (target_structure_model or {}).get("faint_structure_factor")
+    if (
+        target["target_mode"] == "extended"
+        and (target_structure_model or {}).get("status") == "ok"
+        and structure_confidence in {"high", "medium"}
+        and isinstance(faint_factor, (int, float))
+        and 0 < float(faint_factor) <= 1.0
+        and target_signal_rate_e is not None
+    ):
+        science_zone_factor = float(faint_factor)
+        science_zone_percentile = float((target_structure_model or {}).get("science_percentile") or 25.0)
+        science_signal_rate_e = target_signal_rate_e * science_zone_factor
+        structure_aware_integration = True
+        warnings.append(
+            f"총 적분시간은 평균 밝기가 아니라 검출된 확산 구조의 {science_zone_percentile:.0f}백분위 "
+            f"희미한 구역({science_zone_factor:.2f}× 평균)을 목표 SNR에 도달시키도록 계산했습니다. "
+            "희미한 구역 때문에 단일노출을 늘리지는 않습니다."
         )
-        if snr_sub > 0:
+    elif target["target_mode"] == "extended" and (target_structure_model or {}).get("status") == "ok":
+        warnings.append(
+            "대상 구조 영상은 확보했지만 구조 신뢰도가 낮아 총 적분시간을 강제로 늘리는 데 사용하지 않고 포화 진단/참고 정보로만 사용했습니다."
+        )
+
+    if target_signal_rate_e is not None and target_signal_rate_e > 0:
+        snr_sub_mean = _snr_for_exposure(
+            recommended, target_signal_rate_e, bg_rate_e, dark, rn, effective_pixels
+        )
+        if science_signal_rate_e is not None and science_signal_rate_e > 0:
+            snr_sub_science = _snr_for_exposure(
+                recommended, science_signal_rate_e, bg_rate_e, dark, rn, effective_pixels
+            )
+        snr_sub = snr_sub_science if structure_aware_integration else snr_sub_mean
+        if snr_sub_mean and snr_sub_mean > 0:
+            required_frames_mean = max(
+                1, int(math.ceil((target_snr / max(snr_sub_mean * stack_efficiency, 1e-12)) ** 2))
+            )
+        if snr_sub is not None and snr_sub > 0:
             required_frames_unbounded = max(
                 1,
                 int(math.ceil((target_snr / max(snr_sub * stack_efficiency, 1e-12)) ** 2)),
             )
-            low_signal = target_signal_rate_e * (1.0 - signal_uncertainty_fraction)
-            high_signal = target_signal_rate_e * (1.0 + signal_uncertainty_fraction)
+            basis_rate = science_signal_rate_e if structure_aware_integration else target_signal_rate_e
+            assert basis_rate is not None
+            low_signal = basis_rate * (1.0 - signal_uncertainty_fraction)
+            high_signal = basis_rate * (1.0 + signal_uncertainty_fraction)
             optimistic_snr = _snr_for_exposure(
                 recommended, high_signal, bg_rate_e_low, dark, rn, effective_pixels
             )
@@ -715,7 +766,7 @@ def _build_plan(
                 max_frames_exceeded = True
                 warnings.append(
                     f"목표 SNR에 필요한 프레임 수 {required_frames_unbounded:,}장이 설정 한계 {max_frames:,}장을 초과합니다. "
-                    f"최대 장수에서 예상 SNR은 약 {achievable_snr_at_max_frames:.1f}입니다."
+                    f"최대 장수에서 계획 기준 구역 예상 SNR은 약 {achievable_snr_at_max_frames:.1f}입니다."
                 )
                 frames = None
             else:
@@ -741,8 +792,15 @@ def _build_plan(
         "status": "ok" if recommended > 0 else "invalid",
         "recommended_sub_exposure_sec": float(recommended),
         "predicted_snr_per_sub": None if snr_sub is None else float(snr_sub),
+        "predicted_snr_per_sub_mean": None if snr_sub_mean is None else float(snr_sub_mean),
+        "predicted_snr_per_sub_science_zone": None if snr_sub_science is None else float(snr_sub_science),
+        "snr_basis": "faint_structure_zone" if structure_aware_integration else "mean_target_signal",
+        "structure_aware_integration": structure_aware_integration,
+        "science_zone_factor": science_zone_factor,
+        "science_zone_percentile": science_zone_percentile,
         "frames": frames,
         "required_frames_unbounded": required_frames_unbounded,
+        "required_frames_mean_target": required_frames_mean,
         "required_frames_range": required_frames_range,
         "max_frames_exceeded": max_frames_exceeded,
         "achievable_snr_at_max_frames": achievable_snr_at_max_frames,
@@ -773,6 +831,7 @@ def _build_plan(
             "efficiency_target": exposure_efficiency_target,
             "selection_policy": "shortest practical exposure satisfying physical lower bounds, then hard safety caps",
             "uncertainty_policy": "low sky for read-noise lower bound; high sky and high signal for saturation limits",
+            "structure_policy": "bright morphology constrains sub-exposure saturation; faint morphology constrains total integration, never by extending sub-exposure",
         },
         "confidence": confidence,
         "warnings": warnings,
@@ -1007,6 +1066,43 @@ def run_session_analysis(
     else:
         n_pix = max(1, effective_pixels)
 
+    target_structure: dict[str, Any]
+    target_structure_plot: str | None = None
+    if target["target_mode"] == "extended" and not limited_target_model:
+        target_structure, structure_warnings, target_structure_plot = fetch_target_structure(
+            ra_deg=target.get("ra_deg"),
+            dec_deg=target.get("dec_deg"),
+            target_size_deg=target.get("size_deg"),
+            target_mode=target["target_mode"],
+            result_dir=result_dir,
+            survey=survey_for_filter(profile.filter_name),
+        )
+        warnings.extend(structure_warnings)
+        if target_structure.get("status") == "ok":
+            target_structure["filter_name"] = profile.filter_name or None
+            target_structure["passband_role"] = "relative_morphology_only"
+            if _is_narrowband_filter(profile.filter_name):
+                if target_structure.get("confidence") == "high":
+                    target_structure["confidence"] = "medium"
+                warnings.append(
+                    "협대역/다중대역에서는 DSS2 참조 형태가 실제 필터의 방출선 구조와 완전히 같지 않습니다. "
+                    "구조 계수는 상대 형태 보조값이며 신뢰도를 한 단계 낮췄습니다."
+                )
+            object_text = f"{target.get('name','')} {target.get('object_type','')}".casefold()
+            if "dark nebula" in object_text or "암흑성운" in object_text:
+                target_structure["confidence"] = "low"
+                warnings.append(
+                    "암흑성운은 주변보다 어두운 흡수 구조이므로 양의 diffuse surface-brightness 모델과 맞지 않습니다. "
+                    "구조 기반 총 적분시간을 강제하지 않습니다."
+                )
+    else:
+        target_structure = {
+            "status": "unavailable",
+            "confidence": "none",
+            "source": "not_applicable",
+            "notes": ["점광원 또는 이동 태양계 대상에는 고정 하늘 survey 형태 분석을 적용하지 않습니다."],
+        }
+
     plan = _build_plan(
         profile=profile,
         target=target,
@@ -1025,8 +1121,11 @@ def run_session_analysis(
         background_uncertainty_fraction=background_uncertainty_fraction,
         signal_uncertainty_fraction=signal_uncertainty_fraction,
         target_signal_rate_e_per_pixel=signal_per_pixel,
+        target_structure_model=target_structure,
     )
     warnings.extend(plan["warnings"])
+    evidence_prior, evidence_warnings = exposure_evidence_prior(target, plan.get("recommended_sub_exposure_sec"))
+    warnings.extend(evidence_warnings)
 
     curve_path = result_dir / "exposure_snr_curve.png"
     curve_min = max(0.05, min_sub_exposure_sec / 3.0)
@@ -1127,6 +1226,13 @@ def run_session_analysis(
         "sky_distribution": f"/results/{job_id}/{sky.distribution_path}" if sky.distribution_path else "",
         "sky_table": f"/results/{job_id}/{sky.table_path}" if sky.table_path else "",
         "exposure_snr_curve": f"/results/{job_id}/{curve_path.name}",
+        "target_structure_profile": (
+            f"/results/{job_id}/{target_structure_plot}" if target_structure_plot else ""
+        ),
+        "target_structure_reference_fits": (
+            f"/results/{job_id}/target_reference_dss2_red.fits"
+            if (result_dir / "target_reference_dss2_red.fits").exists() else ""
+        ),
         "result_json": f"/results/{job_id}/result.json",
     }
     result = {
@@ -1182,8 +1288,11 @@ def run_session_analysis(
             "signal_e_per_sec_per_pixel": signal_per_pixel,
             "effective_pixels": n_pix,
             "uncertainty_fraction": signal_uncertainty_fraction,
+            "structure_applied": bool(plan.get("structure_aware_integration")),
             **signal_diag,
         },
+        "target_structure_model": target_structure,
+        "exposure_evidence_prior": evidence_prior,
         "plan": plan,
         "confidence": confidence,
         "warnings": list(dict.fromkeys(warnings)),

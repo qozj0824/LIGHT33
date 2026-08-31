@@ -1,5 +1,7 @@
 # NØXIS
 
+> **v37.0 structure-aware exposure planning:** Fixed deep-sky targets can now use a small CDS HiPS2FITS DSS2/red cutout as a *relative morphology map*. NØXIS divides the detected target into brightness percentile zones, uses the robust bright zone to constrain target-pixel saturation, and uses the 25th-percentile faint structure to determine total integration time. Survey counts never replace the calibrated absolute signal model. The bundled exposure-evidence dataset is queried only as a warning-only prior and never overrides the physics-based recommendation. Network/survey failure automatically falls back to the v36.3 mean-surface-brightness method.
+
 > **v36.3 header/preview reliability:** FITS inspection now builds WCS from a compact standards-only header instead of validating hundreds of unrelated ESO instrument cards. Preview statistics use a deterministic sample while exact clipping extrema remain full-frame. The main upload waits for inspection before reporting missing exposure, retries metadata during analysis after a fast-inspection failure, and newly created profiles retain compact browser-side previews. Bright extended targets such as planets and the Moon receive a target-pixel saturation upper bound before an exposure is recommended.
 
 > **v36.2 process-level exposure model:** Recommendations are produced from the same SNR variance and read-noise/overhead information-efficiency equations for every input, not fitted to one FORS2/APICAM answer. Background uncertainty is propagated in opposite physical directions for read-noise and saturation constraints, signal-model uncertainty produces a required-frame range, and maximum exposure remains a hard cap. FITS/RAW/EXIF exposure provenance and conflicts are retained, missing target sky cells use explicit uncertainty-ranked fallbacks, the UI always displays sub-exposure in seconds, and the header uses a rounded vector Saturn wordmark.
@@ -12,14 +14,14 @@
 > **v35.9 APICAM pedestal:** If an ESO APICAM FITS has no explicit Bias/offset calibration, NØXIS can estimate the same-frame bias+dark pedestal from the optically dark detector area outside the calibrated 180° image circle. The method is APICAM-specific, provenance is saved in JSON, and directional Csys quality remains planning until independent fisheye hold-out validation.
 > **v35.8 Render memory fix:** 4k-class all-sky FITS frames (including ESO APICAM/ALPACA) are now reduced to an 600-pixel analysis grid before coordinate transforms and star masking. The final 72×18 sky grid remains strongly oversampled, while peak RAM during equipment-profile creation is substantially lower.
 
- v36.3
+ v37.0
 
 > **v35.6 APICAM support:** ESO APICAM FITS files now use a camera-specific 4096×4096 mirrored fisheye directional model instead of the Canon EOS R/Sigma 8 mm calibration. The bundled APICAM solution is intentionally planning-grade until independent hold-out/external validation is completed.
 
 
 **방향별 하늘 배경과 저장된 장비 프로필을 이용한 천체 촬영 계획 프로그램**
 
-NØXIS v36.3은 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화·스택 계산 원리를 하나의 로컬 웹 프로그램으로 연결한 배포본입니다.
+NØXIS v37.0은 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화·스택 계산 원리를 하나의 로컬 웹 프로그램으로 연결한 배포본입니다.
 
 ## v34.2 핵심 수정
 
