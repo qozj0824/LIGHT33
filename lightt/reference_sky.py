@@ -76,7 +76,7 @@ def fetch_target_structure(
     else:
         for endpoint in HIPS_ENDPOINTS:
             try:
-                req = Request(endpoint + "?" + urlencode(params), headers={"User-Agent": "NOXIS/37 morphology planner"})
+                req = Request(endpoint + "?" + urlencode(params), headers={"User-Agent": "NOXIS/38 morphology planner"})
                 with urlopen(req, timeout=timeout_sec) as response:
                     length = response.headers.get("Content-Length")
                     if length and int(length) > 16_000_000:

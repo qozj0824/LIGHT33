@@ -902,7 +902,7 @@ pre { max-height: 580px; overflow: auto; margin: 0; padding: 11px; background: #
 
 /* Keep only the useful quality choice in the normal planning view. */
 .quality-control { padding: 8px 9px 9px; border-radius: 5px; }
-.quality-row { margin-bottom: 0; }
+.quality-row { margin-bottom: 0; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .quality-row button {
   min-height: 43px;
   display: grid;
@@ -1017,3 +1017,6 @@ details,
   .metric-grid-secondary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .upload-preview-frame { min-height: 180px; }
 }
+
+.profile-backup-row { display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin:8px 0 10px; }
+.profile-backup-row .profile-actions-inline { margin:0; }

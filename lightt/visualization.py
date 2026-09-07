@@ -230,3 +230,49 @@ def save_exposure_snr_curve(
     ax.legend(loc="best")
     fig.savefig(output, dpi=160)
     plt.close(fig)
+
+
+def save_stack_efficiency_curve(
+    curve: list[dict[str, float | int]],
+    tiers: dict[str, dict[str, float | int | str | bool]],
+    output: Path,
+    *,
+    selected_mode: str = "balanced",
+) -> None:
+    """Plot finite-horizon stack information gain and reliable structure coverage."""
+    import matplotlib.pyplot as plt
+
+    rows = [row for row in curve if isinstance(row, dict)]
+    if not rows:
+        return
+    x = np.asarray([float(row.get("integration_sec", 0.0)) / 3600.0 for row in rows], dtype=float)
+    utility = np.asarray([100.0 * float(row.get("structure_utility", 0.0)) for row in rows], dtype=float)
+    reliable = np.asarray([100.0 * float(row.get("reliable_structure_fraction", 0.0)) for row in rows], dtype=float)
+    valid = np.isfinite(x) & np.isfinite(utility) & np.isfinite(reliable) & (x > 0)
+    x, utility, reliable = x[valid], utility[valid], reliable[valid]
+    if not x.size:
+        return
+    fig, ax = plt.subplots(figsize=(10, 5.5), constrained_layout=True)
+    ax.plot(x, utility, linewidth=2.0, label=plot_text("구조 정보 효용", "Structure information utility"))
+    ax.plot(x, reliable, linewidth=1.6, linestyle="--", label=plot_text("SNR≥5 구조 비율", "Reliable structure fraction (SNR≥5)"))
+    if float(np.max(x)) / max(float(np.min(x)), 1e-12) > 20:
+        ax.set_xscale("log")
+    for key in ("quick", "balanced", "deep", "very_deep"):
+        tier = tiers.get(key) or {}
+        sec = tier.get("integration_sec")
+        if not isinstance(sec, (int, float)) or sec <= 0:
+            continue
+        hours = float(sec) / 3600.0
+        label = str(tier.get("label") or key)
+        if key == selected_mode:
+            label = f"{label} · 선택"
+        ax.axvline(hours, linestyle=":" if key != selected_mode else "--", linewidth=1.0, label=label)
+    ax.set_ylim(0, 103)
+    ax.set_xlabel(plot_text("총 적분시간 (시간)", "Total integration (hours)"))
+    ax.set_ylabel(plot_text("구조 확보 지표 (%)", "Structure recovery metric (%)"))
+    ax.set_title(plot_text("스택 효율과 한계효용", "Stack efficiency and diminishing returns"))
+    ax.grid(alpha=0.25)
+    ax.legend(loc="best", fontsize=8)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=160)
+    plt.close(fig)

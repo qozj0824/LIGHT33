@@ -26,10 +26,11 @@ from .planning import (
     _safe_round_down,
 )
 from .sky import build_sky_map, prepare_sky_analysis_frame
-from .visualization import save_exposure_snr_curve
+from .visualization import save_stack_efficiency_curve
 from .time_utils import observation_time_difference_minutes
 from .reference_sky import fetch_target_structure, survey_for_filter
 from .evidence import exposure_evidence_prior
+from .stacking import build_stack_efficiency_plan
 
 
 def _finite(value: Any) -> float | None:
@@ -431,7 +432,7 @@ def _build_plan(
     background_rate_adu_per_pix: float,
     target_signal_rate_e: float | None,
     effective_pixels: int,
-    target_snr: float,
+    target_snr: float | None,
     min_sub_exposure_sec: float,
     max_sub_exposure_sec: float,
     tracking_limit_sec: float,
@@ -444,6 +445,8 @@ def _build_plan(
     signal_uncertainty_fraction: float = 0.0,
     target_signal_rate_e_per_pixel: float | None = None,
     target_structure_model: dict[str, Any] | None = None,
+    stack_mode: str = "balanced",
+    max_stack_hours: float = 12.0,
 ) -> dict[str, Any]:
     warnings: list[str] = []
     gain = profile.gain_e_per_adu
@@ -566,7 +569,9 @@ def _build_plan(
         ),
     )
     constraint_inputs = {
-        "target_snr": float(target_snr),
+        "legacy_target_snr_ignored": None if target_snr is None else float(target_snr),
+        "stack_mode": str(stack_mode),
+        "max_stack_hours": float(max_stack_hours),
         "min_sub_exposure_sec": float(min_sub_exposure_sec),
         "max_sub_exposure_sec": float(max_sub_exposure_sec),
         "tracking_limit_sec": float(tracking_limit_sec),
@@ -688,13 +693,13 @@ def _build_plan(
     snr_sub_science: float | None = None
     snr_sub: float | None = None
     frames: int | None = None
-    required_frames_unbounded: int | None = None
-    required_frames_mean: int | None = None
-    max_frames_exceeded = False
-    achievable_snr_at_max_frames: float | None = None
     total: float | None = None
     elapsed: float | None = None
-    required_frames_range: list[int] | None = None
+    stack_plan: dict[str, Any] = {
+        "status": "unavailable",
+        "mode": stack_mode,
+        "reason": "대상 신호 모델이 없습니다.",
+    }
     science_signal_rate_e: float | None = target_signal_rate_e
     structure_aware_integration = False
     science_zone_factor = 1.0
@@ -714,13 +719,13 @@ def _build_plan(
         science_signal_rate_e = target_signal_rate_e * science_zone_factor
         structure_aware_integration = True
         warnings.append(
-            f"총 적분시간은 평균 밝기가 아니라 검출된 확산 구조의 {science_zone_percentile:.0f}백분위 "
-            f"희미한 구역({science_zone_factor:.2f}× 평균)을 목표 SNR에 도달시키도록 계산했습니다. "
-            "희미한 구역 때문에 단일노출을 늘리지는 않습니다."
+            f"스택 효율 평가는 평균 밝기뿐 아니라 검출된 확산 구조의 {science_zone_percentile:.0f}백분위 "
+            f"희미한 구역({science_zone_factor:.2f}× 평균)까지 함께 추적합니다. "
+            "희미한 구역 때문에 단일노출을 늘리지 않고, 추가 적분으로 구조 확보도가 어떻게 좋아지는지만 계산합니다."
         )
     elif target["target_mode"] == "extended" and (target_structure_model or {}).get("status") == "ok":
         warnings.append(
-            "대상 구조 영상은 확보했지만 구조 신뢰도가 낮아 총 적분시간을 강제로 늘리는 데 사용하지 않고 포화 진단/참고 정보로만 사용했습니다."
+            "대상 구조 영상은 확보했지만 구조 신뢰도가 낮아 스택 권고를 강제로 바꾸지 않고 평균 대상 신호 중심으로 효율을 계산합니다."
         )
 
     if target_signal_rate_e is not None and target_signal_rate_e > 0:
@@ -732,48 +737,90 @@ def _build_plan(
                 recommended, science_signal_rate_e, bg_rate_e, dark, rn, effective_pixels
             )
         snr_sub = snr_sub_science if structure_aware_integration else snr_sub_mean
-        if snr_sub_mean and snr_sub_mean > 0:
-            required_frames_mean = max(
-                1, int(math.ceil((target_snr / max(snr_sub_mean * stack_efficiency, 1e-12)) ** 2))
+        stack_plan = build_stack_efficiency_plan(
+            sub_exposure_sec=recommended,
+            mean_signal_rate_e=target_signal_rate_e,
+            background_rate_e_per_pix=bg_rate_e,
+            dark_current_e_per_pix_sec=dark,
+            read_noise_e=rn,
+            effective_pixels=effective_pixels,
+            stack_efficiency=stack_efficiency,
+            frame_overhead_sec=frame_overhead_sec,
+            max_frames=max_frames,
+            max_stack_hours=max_stack_hours,
+            mode=stack_mode,
+            structure_model=target_structure_model,
+        )
+        if stack_plan.get("status") == "ok":
+            # Preserve v37 uncertainty handling without going back to target-SNR inversion:
+            # recompute the same diminishing-return policy under optimistic/pessimistic
+            # signal and background models and report a practical range.
+            optimistic_plan = build_stack_efficiency_plan(
+                sub_exposure_sec=recommended,
+                mean_signal_rate_e=target_signal_rate_e * (1.0 + signal_uncertainty_fraction),
+                background_rate_e_per_pix=bg_rate_e_low,
+                dark_current_e_per_pix_sec=dark,
+                read_noise_e=rn,
+                effective_pixels=effective_pixels,
+                stack_efficiency=stack_efficiency,
+                frame_overhead_sec=frame_overhead_sec,
+                max_frames=max_frames,
+                max_stack_hours=max_stack_hours,
+                mode=stack_mode,
+                structure_model=target_structure_model,
             )
-        if snr_sub is not None and snr_sub > 0:
-            required_frames_unbounded = max(
-                1,
-                int(math.ceil((target_snr / max(snr_sub * stack_efficiency, 1e-12)) ** 2)),
+            pessimistic_signal = max(target_signal_rate_e * (1.0 - signal_uncertainty_fraction), target_signal_rate_e * 0.02)
+            pessimistic_plan = build_stack_efficiency_plan(
+                sub_exposure_sec=recommended,
+                mean_signal_rate_e=pessimistic_signal,
+                background_rate_e_per_pix=bg_rate_e_high,
+                dark_current_e_per_pix_sec=dark,
+                read_noise_e=rn,
+                effective_pixels=effective_pixels,
+                stack_efficiency=stack_efficiency,
+                frame_overhead_sec=frame_overhead_sec,
+                max_frames=max_frames,
+                max_stack_hours=max_stack_hours,
+                mode=stack_mode,
+                structure_model=target_structure_model,
             )
-            basis_rate = science_signal_rate_e if structure_aware_integration else target_signal_rate_e
-            assert basis_rate is not None
-            low_signal = basis_rate * (1.0 - signal_uncertainty_fraction)
-            high_signal = basis_rate * (1.0 + signal_uncertainty_fraction)
-            optimistic_snr = _snr_for_exposure(
-                recommended, high_signal, bg_rate_e_low, dark, rn, effective_pixels
-            )
-            pessimistic_snr = _snr_for_exposure(
-                recommended, low_signal, bg_rate_e_high, dark, rn, effective_pixels
-            )
-            optimistic_frames = max(
-                1,
-                int(math.ceil((target_snr / max(optimistic_snr * stack_efficiency, 1e-12)) ** 2)),
-            )
-            pessimistic_frames = max(
-                optimistic_frames,
-                int(math.ceil((target_snr / max(pessimistic_snr * stack_efficiency, 1e-12)) ** 2)),
-            )
-            required_frames_range = [optimistic_frames, pessimistic_frames]
-            frames = required_frames_unbounded
-            achievable_snr_at_max_frames = snr_sub * stack_efficiency * math.sqrt(max_frames)
-            if required_frames_unbounded > max_frames:
-                max_frames_exceeded = True
-                warnings.append(
-                    f"목표 SNR에 필요한 프레임 수 {required_frames_unbounded:,}장이 설정 한계 {max_frames:,}장을 초과합니다. "
-                    f"최대 장수에서 계획 기준 구역 예상 SNR은 약 {achievable_snr_at_max_frames:.1f}입니다."
+            if optimistic_plan.get("status") == "ok" and pessimistic_plan.get("status") == "ok":
+                low_frames = min(int(optimistic_plan["recommended_frames"]), int(pessimistic_plan["recommended_frames"]))
+                high_frames = max(int(optimistic_plan["recommended_frames"]), int(pessimistic_plan["recommended_frames"]))
+                stack_plan["recommended_frames_range"] = [low_frames, high_frames]
+                stack_plan["recommended_integration_range_sec"] = [low_frames * recommended, high_frames * recommended]
+                stack_plan["uncertainty_horizon_limited"] = bool(
+                    optimistic_plan.get("horizon_limited") or pessimistic_plan.get("horizon_limited")
                 )
-                frames = None
+                stack_plan["uncertainty_cap_limited"] = bool(
+                    optimistic_plan.get("cap_limited") or pessimistic_plan.get("cap_limited")
+                )
+            frames = int(stack_plan["recommended_frames"])
+            total = float(stack_plan["recommended_integration_sec"])
+            elapsed = float(stack_plan["recommended_elapsed_sec"])
+            if stack_plan.get("cap_limited"):
+                reason = stack_plan.get("cap_limit_reason")
+                if reason == "max_frames":
+                    limit_text = f"최대 프레임 수 {max_frames:,}장"
+                elif reason == "time_horizon_and_max_frames":
+                    limit_text = f"{max_stack_hours:g}시간 계획 범위와 최대 {max_frames:,}장 제한"
+                else:
+                    limit_text = f"{max_stack_hours:g}시간 계획 범위"
+                warnings.append(
+                    f"선택한 스택 단계({stack_plan.get('mode_label', stack_mode)})의 한계효용 감소점이 "
+                    f"{limit_text} 안에서 충분히 나타나지 않아 현재 계산 한계의 끝을 권장값으로 표시했습니다. "
+                    "더 오래 또는 더 많이 찍으면 계속 좋아질 수 있지만, NØXIS가 계산 범위 밖을 임의로 외삽해 강제 권고하지는 않습니다."
+                )
             else:
-                total = frames * recommended
-                elapsed = frames * (recommended + frame_overhead_sec)
+                gain = float(stack_plan.get("additional_hour_structure_utility_gain") or 0.0) * 100.0
+                warnings.append(
+                    f"총 적분시간은 목표 SNR이 아니라 밝기 구역별 구조 확보 정보의 한계효용으로 선택했습니다. "
+                    f"현재 권장점 이후 1시간 추가 시 모델 구조 효용 증가는 약 {gain:.1f}%p입니다."
+                )
     else:
-        warnings.append("대상 신호 모델이 없어 단일노출 후보만 계산하고 목표 SNR 기반 촬영 장수는 표시하지 않습니다.")
+        warnings.append(
+            "대상 신호 모델이 없어 단일노출 후보만 계산합니다. 목표 SNR을 임의로 가정하지 않으며 스택 시간도 강제 권고하지 않습니다."
+        )
 
     confidence = "high"
     if profile.confidence == "low":
@@ -799,13 +846,17 @@ def _build_plan(
         "science_zone_factor": science_zone_factor,
         "science_zone_percentile": science_zone_percentile,
         "frames": frames,
-        "required_frames_unbounded": required_frames_unbounded,
-        "required_frames_mean_target": required_frames_mean,
-        "required_frames_range": required_frames_range,
-        "max_frames_exceeded": max_frames_exceeded,
-        "achievable_snr_at_max_frames": achievable_snr_at_max_frames,
+        "recommended_frames": frames,
+        "required_frames_unbounded": None,
+        "required_frames_mean_target": None,
+        "required_frames_range": None,
+        "max_frames_exceeded": False,
+        "achievable_snr_at_max_frames": None,
         "total_integration_sec": None if total is None else float(total),
         "total_elapsed_sec": None if elapsed is None else float(elapsed),
+        "stack_mode": stack_mode,
+        "max_stack_hours": float(max_stack_hours),
+        "stack_efficiency_plan": stack_plan,
         "sky_limited_lower_sec": float(sky_lower),
         "background_upper_sec": None if background_upper is None else float(background_upper),
         "saturation_upper_sec": None if saturation_upper is None else float(saturation_upper),
@@ -831,7 +882,8 @@ def _build_plan(
             "efficiency_target": exposure_efficiency_target,
             "selection_policy": "shortest practical exposure satisfying physical lower bounds, then hard safety caps",
             "uncertainty_policy": "low sky for read-noise lower bound; high sky and high signal for saturation limits",
-            "structure_policy": "bright morphology constrains sub-exposure saturation; faint morphology constrains total integration, never by extending sub-exposure",
+            "structure_policy": "bright morphology constrains sub-exposure saturation; all reliable brightness zones feed the stack information curve; faint morphology never extends sub-exposure",
+            "stack_policy": "no user target SNR; choose finite-horizon diminishing-return points from weighted structure utility",
         },
         "confidence": confidence,
         "warnings": warnings,
@@ -848,7 +900,9 @@ def run_session_analysis(
     allsky_calibration: CalibrationSet | None = None,
     allsky_exposure_sec: float | None = None,
     allsky_bias_offset_adu: float | None = None,
-    target_snr: float = 100.0,
+    target_snr: float | None = None,
+    stack_mode: str = "balanced",
+    max_stack_hours: float = 12.0,
     min_sub_exposure_sec: float = 1.0,
     max_sub_exposure_sec: float = 600.0,
     tracking_limit_sec: float = 0.0,
@@ -1059,7 +1113,7 @@ def run_session_analysis(
     if signal_rate is not None and signal_uncertainty_fraction > 0:
         warnings.append(
             f"대상 신호 모델의 근거({signal_source})에 따라 신호율 불확실성을 "
-            f"±{signal_uncertainty_fraction:.0%}로 표시하고 필요 장수 범위에 전파했습니다."
+            f"±{signal_uncertainty_fraction:.0%}로 표시하고 스택 권고 범위에 전파했습니다."
         )
     if target["target_mode"] == "point":
         n_pix = max(1, profile.reference_aperture_pixels or effective_pixels)
@@ -1122,44 +1176,25 @@ def run_session_analysis(
         signal_uncertainty_fraction=signal_uncertainty_fraction,
         target_signal_rate_e_per_pixel=signal_per_pixel,
         target_structure_model=target_structure,
+        stack_mode=stack_mode,
+        max_stack_hours=max_stack_hours,
     )
     warnings.extend(plan["warnings"])
     evidence_prior, evidence_warnings = exposure_evidence_prior(target, plan.get("recommended_sub_exposure_sec"))
     warnings.extend(evidence_warnings)
 
-    curve_path = result_dir / "exposure_snr_curve.png"
-    curve_min = max(0.05, min_sub_exposure_sec / 3.0)
-    curve_max = max(curve_min * 10, min(max_sub_exposure_sec, max(plan.get("practical_upper_sec") or 0, 10.0)))
-    xs = np.geomspace(curve_min, curve_max, 180)
-    if signal_rate is not None and signal_rate > 0:
-        bg_e = background_rate_for_plan * profile.gain_e_per_adu
-        ys = np.array([
-            _snr_for_exposure(x, signal_rate, bg_e, profile.dark_current_e_per_pix_sec, profile.read_noise_e, n_pix)
-            for x in xs
-        ])
-        save_exposure_snr_curve(
-            xs,
-            ys,
-            curve_path,
-            current_exposure_sec=plan["recommended_sub_exposure_sec"] or 1.0,
-            current_snr=plan["predicted_snr_per_sub"] or 0.0,
-            target_snr=target_snr,
-            recommended_exposure_sec=plan["recommended_sub_exposure_sec"],
-            practical_upper_sec=plan["practical_upper_sec"],
-        )
-    else:
-        # A zero line still documents that the sub exposure is constrained by sky/
-        # saturation but the target SNR model is unavailable.
-        save_exposure_snr_curve(
-            xs,
-            np.zeros_like(xs),
-            curve_path,
-            current_exposure_sec=1.0,
-            current_snr=0.0,
-            target_snr=target_snr,
-            recommended_exposure_sec=plan["recommended_sub_exposure_sec"],
-            practical_upper_sec=plan["practical_upper_sec"],
-        )
+    stack_curve_path = result_dir / "stack_efficiency_curve.png"
+    stack_payload = plan.get("stack_efficiency_plan") or {}
+    if stack_payload.get("status") == "ok":
+        try:
+            save_stack_efficiency_curve(
+                stack_payload.get("curve") or [],
+                stack_payload.get("tiers") or {},
+                stack_curve_path,
+                selected_mode=str(stack_payload.get("mode") or stack_mode),
+            )
+        except Exception as exc:
+            warnings.append(f"스택 효율 그래프 생성 생략: {type(exc).__name__}")
 
     confidence = plan["confidence"]
     validity = "quantitative_candidate"
@@ -1225,7 +1260,9 @@ def run_session_analysis(
         "sky_altitude_profiles": f"/results/{job_id}/{sky.horizon_profile_path}" if sky.horizon_profile_path else "",
         "sky_distribution": f"/results/{job_id}/{sky.distribution_path}" if sky.distribution_path else "",
         "sky_table": f"/results/{job_id}/{sky.table_path}" if sky.table_path else "",
-        "exposure_snr_curve": f"/results/{job_id}/{curve_path.name}",
+        "stack_efficiency_curve": (
+            f"/results/{job_id}/{stack_curve_path.name}" if stack_curve_path.exists() else None
+        ),
         "target_structure_profile": (
             f"/results/{job_id}/{target_structure_plot}" if target_structure_plot else ""
         ),

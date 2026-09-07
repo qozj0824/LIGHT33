@@ -136,10 +136,10 @@ def analyze_relative_structure(
 ) -> TargetStructureProfile:
     """Measure a robust relative brightness distribution from a centered cutout.
 
-    ``science_percentile`` is intentionally not the faintest pixel.  The 25th
-    percentile of detected diffuse target pixels is used for integration-time
-    planning, which protects faint structure while remaining resistant to catalogue
-    size errors and residual background pixels.
+    ``science_percentile`` is intentionally not the faintest pixel.  The robust
+    faint-zone percentile is retained as a diagnostic/science-zone SNR reference;
+    v38 total integration uses all reliable brightness zones and their diminishing-
+    return stack curve instead of forcing this one zone to a target SNR.
     """
     arr = np.asarray(image, dtype=float)
     notes: list[str] = []

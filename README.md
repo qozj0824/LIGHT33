@@ -1,6 +1,6 @@
 # NØXIS
 
-> **v37.0 structure-aware exposure planning:** Fixed deep-sky targets can now use a small CDS HiPS2FITS DSS2/red cutout as a *relative morphology map*. NØXIS divides the detected target into brightness percentile zones, uses the robust bright zone to constrain target-pixel saturation, and uses the 25th-percentile faint structure to determine total integration time. Survey counts never replace the calibrated absolute signal model. The bundled exposure-evidence dataset is queried only as a warning-only prior and never overrides the physics-based recommendation. Network/survey failure automatically falls back to the v36.3 mean-surface-brightness method.
+> **v38.0 stack-efficiency planning + resilient profiles:** NØXIS no longer forces a user-selected target SNR to determine total integration. The physics-based sub-exposure calculation remains separate, while total stack recommendations now follow the time evolution of six target-brightness zones, structure recovery, and diminishing information gain inside a finite planning horizon. Bright structure can still shorten the saturation upper bound; faint structure increases the value of stacking but never lengthens the sub-exposure. Equipment profiles are backed up as compact browser-side core JSON, preview data is isolated, missing Render-local profiles are automatically rehydrated, and profiles can be exported/imported as JSON.
 
 > **v36.3 header/preview reliability:** FITS inspection now builds WCS from a compact standards-only header instead of validating hundreds of unrelated ESO instrument cards. Preview statistics use a deterministic sample while exact clipping extrema remain full-frame. The main upload waits for inspection before reporting missing exposure, retries metadata during analysis after a fast-inspection failure, and newly created profiles retain compact browser-side previews. Bright extended targets such as planets and the Moon receive a target-pixel saturation upper bound before an exposure is recommended.
 
@@ -14,14 +14,14 @@
 > **v35.9 APICAM pedestal:** If an ESO APICAM FITS has no explicit Bias/offset calibration, NØXIS can estimate the same-frame bias+dark pedestal from the optically dark detector area outside the calibrated 180° image circle. The method is APICAM-specific, provenance is saved in JSON, and directional Csys quality remains planning until independent fisheye hold-out validation.
 > **v35.8 Render memory fix:** 4k-class all-sky FITS frames (including ESO APICAM/ALPACA) are now reduced to an 600-pixel analysis grid before coordinate transforms and star masking. The final 72×18 sky grid remains strongly oversampled, while peak RAM during equipment-profile creation is substantially lower.
 
- v37.0
+ v38.0
 
 > **v35.6 APICAM support:** ESO APICAM FITS files now use a camera-specific 4096×4096 mirrored fisheye directional model instead of the Canon EOS R/Sigma 8 mm calibration. The bundled APICAM solution is intentionally planning-grade until independent hold-out/external validation is completed.
 
 
 **방향별 하늘 배경과 저장된 장비 프로필을 이용한 천체 촬영 계획 프로그램**
 
-NØXIS v37.0은 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화·스택 계산 원리를 하나의 로컬 웹 프로그램으로 연결한 배포본입니다.
+NØXIS v38.0은 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화 계산에 천체 밝기 구역별 스택 효율과 한계효용 기반 총 적분 계획을 연결한 배포본입니다.
 
 ## v34.2 핵심 수정
 
@@ -110,13 +110,15 @@ JPG/PNG/TIFF는 미리보기·진단에 사용할 수 있으나 카메라 내부
 
 - 권장 단일 노출
 - 예상 한 장 SNR
-- 목표 SNR 달성에 필요한 촬영 장수
-- 총 적분시간
+- 스택 효율 기반 추천 장수와 총 적분시간
+- 빠름/균형/고품질/매우 깊게 권고 구간
+- 밝기 구역별 예상 스택 SNR과 구조 확보율
+- 추가 촬영의 한계효용 및 계획범위 제한 여부
 - 배경/포화/추적 제한
 - 방향별 하늘 배경
 - 결과 신뢰도와 제한 사유
 
-목표 SNR은 단일 노출을 무조건 늘리는 값으로 사용하지 않습니다. 단일 노출은 read-noise와 프레임 오버헤드를 합친 90% 효율 목표에 처음 도달하는 값을 기준으로 포화·배경·추적 상한을 적용하고, 목표 SNR은 주로 촬영 장수와 총 적분시간에 반영합니다. `최대 단일노출`은 추천을 그 값까지 늘리라는 뜻이 아니라 넘지 말아야 할 상한입니다.
+단일 노출은 read-noise와 프레임 오버헤드를 합친 90% 효율 목표에 처음 도달하는 값을 기준으로 포화·배경·추적 상한을 적용합니다. 총 적분은 특정 목표 SNR을 무조건 달성하도록 역산하지 않습니다. 대신 설정한 계획범위(기본 12시간) 안에서 각 밝기 구역의 SNR 증가, 구조 확보율, 정보효용의 증가 기울기를 계산해 수확 체감 구간을 찾습니다. 계획범위 끝까지 효율적으로 좋아지는 천체는 그 끝을 추천 상한으로 표시하며 더 긴 시간을 임의로 외삽하지 않습니다. `최대 단일노출`은 추천을 그 값까지 늘리라는 뜻이 아니라 넘지 말아야 할 상한입니다.
 
 ## 과학적 범위
 

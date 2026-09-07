@@ -84,3 +84,38 @@ def test_health_exposes_instance_id() -> None:
     payload = client.get("/health").json()
     assert isinstance(payload.get("instance_id"), str)
     assert payload["instance_id"]
+
+
+def test_profile_snapshot_rehydrates_server_storage(tmp_path: Path, monkeypatch) -> None:
+    import json
+    from lightt.equipment import EquipmentProfile, load_profile
+
+    monkeypatch.setattr(app_module, "PROFILE_ROOT", tmp_path / "profiles")
+    profile = EquipmentProfile(
+        profile_id="abc123ef",
+        name="Rehydrated",
+        created_at="2026-09-07T00:00:00+00:00",
+        gain_e_per_adu=1.2,
+        read_noise_e=2.7,
+    )
+    loaded, recovered = app_module._load_profile_or_snapshot(profile.profile_id, json.dumps(profile.to_dict()))
+    assert recovered is True
+    assert loaded.profile_id == profile.profile_id
+    assert load_profile(app_module.PROFILE_ROOT, profile.profile_id).name == "Rehydrated"
+
+
+def test_profile_restore_endpoint_rejects_path_like_id(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "PROFILE_ROOT", tmp_path / "profiles")
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/api/equipment/profiles/restore",
+        json={
+            "profile_id": "../escape",
+            "name": "Bad",
+            "created_at": "2026-09-07T00:00:00+00:00",
+            "gain_e_per_adu": 1.0,
+            "read_noise_e": 3.0,
+        },
+    )
+    assert response.status_code == 422
+    assert not (tmp_path / "escape").exists()

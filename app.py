@@ -31,6 +31,7 @@ from lightt.equipment import (
     delete_profile,
     list_profiles,
     load_profile,
+    save_profile,
     validate_equipment_profile,
 )
 from lightt.session import run_session_analysis
@@ -77,26 +78,39 @@ def _release_memory() -> None:
         pass
 
 
+PROFILE_SNAPSHOT_MAX_CHARS = 200_000
+
+
+def _profile_from_snapshot_payload(raw: object) -> EquipmentProfile:
+    if not isinstance(raw, dict):
+        raise ValueError("프로필 백업 형식이 올바르지 않습니다.")
+    # EquipmentProfile.from_dict intentionally ignores browser-only fields.
+    profile = validate_equipment_profile(EquipmentProfile.from_dict(raw))
+    if not profile.profile_id or not profile.name:
+        raise ValueError("브라우저 장비 프로필 백업이 불완전합니다.")
+    if not re.fullmatch(r"[0-9a-fA-F]{1,64}", profile.profile_id):
+        raise ValueError("장비 프로필 ID가 올바르지 않습니다.")
+    return profile
+
+
 def _load_profile_or_snapshot(profile_id: str, profile_snapshot_json: str | None) -> tuple[EquipmentProfile, bool]:
-    """Load a server profile, falling back to a browser-cached snapshot after a Render restart."""
+    """Load a server profile, then rehydrate it from a compact browser snapshot if needed."""
     try:
         return load_profile(PROFILE_ROOT, profile_id), False
     except ValueError as original:
         if not profile_snapshot_json:
             raise original
-        if len(profile_snapshot_json) > 500_000:
-            raise ValueError("브라우저 장비 프로필 백업이 너무 큽니다.") from original
+        if len(profile_snapshot_json) > PROFILE_SNAPSHOT_MAX_CHARS:
+            raise ValueError("브라우저 장비 프로필 핵심 백업이 비정상적으로 큽니다.") from original
         try:
-            raw = json.loads(profile_snapshot_json)
-            if not isinstance(raw, dict):
-                raise ValueError("프로필 백업 형식이 올바르지 않습니다.")
-            profile = validate_equipment_profile(EquipmentProfile.from_dict(raw))
+            profile = _profile_from_snapshot_payload(json.loads(profile_snapshot_json))
         except Exception as exc:
             raise ValueError("브라우저 장비 프로필 백업을 읽을 수 없습니다.") from exc
         if profile.profile_id != profile_id:
             raise ValueError("브라우저 장비 프로필 백업 ID가 현재 선택과 다릅니다.")
-        if not profile.name:
-            raise ValueError("브라우저 장비 프로필 백업이 불완전합니다.")
+        # Render Free local storage is ephemeral.  Once a valid browser backup is
+        # supplied, recreate profile.json for the lifetime of this server instance.
+        save_profile(PROFILE_ROOT, profile)
         return profile, True
 
 @asynccontextmanager
@@ -563,6 +577,24 @@ async def equipment_profile_preview(profile_id: str, role: str) -> FileResponse:
     return FileResponse(preview_path, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
 
+@app.post("/api/equipment/profiles/restore")
+def equipment_profile_restore(payload: Annotated[dict[str, object], Body()]) -> dict[str, object]:
+    """Restore a compact browser/exported profile into this ephemeral Render instance."""
+    try:
+        serialized = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        if len(serialized) > PROFILE_SNAPSHOT_MAX_CHARS:
+            raise ValueError("장비 프로필 핵심 백업이 비정상적으로 큽니다.")
+        profile = _profile_from_snapshot_payload(payload)
+        save_profile(PROFILE_ROOT, profile)
+        result = profile.to_dict()
+        result["restored"] = True
+        result["scope_preview_url"] = _profile_preview_url(profile.profile_id, "scope")
+        result["allsky_preview_url"] = _profile_preview_url(profile.profile_id, "allsky")
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.delete("/api/equipment/profiles/{profile_id}")
 def equipment_profile_delete(profile_id: str) -> dict[str, object]:
     try:
@@ -739,7 +771,9 @@ async def session_analyze(
     target_longitude: Annotated[float | None, Form()] = None,
     allsky_exposure_sec: Annotated[float | None, Form()] = None,
     allsky_bias_offset_adu: Annotated[float | None, Form()] = None,
-    target_snr: Annotated[float, Form()] = 100.0,
+    target_snr: Annotated[float | None, Form()] = None,
+    stack_mode: Annotated[str, Form()] = "balanced",
+    max_stack_hours: Annotated[float, Form()] = 12.0,
     min_sub_exposure_sec: Annotated[float, Form()] = 1.0,
     max_sub_exposure_sec: Annotated[float, Form()] = 600.0,
     tracking_limit_sec: Annotated[float, Form()] = 0.0,
@@ -771,7 +805,11 @@ async def session_analyze(
         _finite_range("Stellarium 위도", target_latitude, -90, 90)
     if target_longitude is not None:
         _finite_range("Stellarium 경도", target_longitude, -180, 180)
-    _finite_range("목표 SNR", target_snr, 0.1, 10000)
+    if target_snr is not None:
+        _finite_range("구형 목표 SNR", target_snr, 0.1, 10000)
+    if stack_mode not in {"quick", "balanced", "deep", "very_deep"}:
+        raise HTTPException(status_code=422, detail="스택 전략이 올바르지 않습니다.")
+    _finite_range("스택 분석 최대 시간", max_stack_hours, 0.05, 336.0)
     _finite_range("최소 단일노출", min_sub_exposure_sec, 0.001, 86400)
     _finite_range("최대 단일노출", max_sub_exposure_sec, min_sub_exposure_sec, 86400)
     _finite_range("배경 제한비율", background_limit_fraction, 0.01, 0.95)
@@ -838,6 +876,8 @@ async def session_analyze(
                 allsky_exposure_sec=allsky_exposure_sec,
                 allsky_bias_offset_adu=allsky_bias_offset_adu,
                 target_snr=target_snr,
+                stack_mode=stack_mode,
+                max_stack_hours=max_stack_hours,
                 min_sub_exposure_sec=min_sub_exposure_sec,
                 max_sub_exposure_sec=max_sub_exposure_sec,
                 tracking_limit_sec=tracking_limit_sec,

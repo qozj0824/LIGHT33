@@ -106,7 +106,7 @@ def test_extended_target_uses_integrated_mag_and_size():
     assert "mean_surface_brightness_mag_arcsec2" in diag
 
 
-def test_target_snr_changes_frames_not_single_exposure_when_constraints_same():
+def test_legacy_target_snr_does_not_change_current_session_recommendation():
     p = profile()
     target = {"target_mode": "point"}
     low = _build_plan(
@@ -143,7 +143,9 @@ def test_target_snr_changes_frames_not_single_exposure_when_constraints_same():
     )
     assert low["recommended_sub_exposure_sec"] == high["recommended_sub_exposure_sec"]
     assert low["frames"] is not None and high["frames"] is not None
-    assert high["frames"] > low["frames"]
+    assert high["frames"] == low["frames"]
+    assert low["constraint_inputs"]["legacy_target_snr_ignored"] == 50.0
+    assert high["constraint_inputs"]["legacy_target_snr_ignored"] == 150.0
 
 
 def test_session_plan_uses_efficiency_target_without_exceeding_110_second_cap():
@@ -262,7 +264,9 @@ def test_background_and_signal_uncertainty_are_propagated_not_fitted():
     )
     assert result["recommended_sub_exposure_range_sec"] == [100.0, 120.0]
     assert result["recommended_sub_exposure_sec"] == 120.0
-    assert result["required_frames_range"][0] < result["frames"] < result["required_frames_range"][1]
+    stack = result["stack_efficiency_plan"]
+    assert stack["recommended_frames_range"][0] <= result["frames"] <= stack["recommended_frames_range"][1]
+    assert stack["recommended_integration_range_sec"][0] <= result["total_integration_sec"] <= stack["recommended_integration_range_sec"][1]
     assert "RN^2" in result["physics_model"]["snr_variance"]
     assert result["constraint_inputs"]["background_uncertainty_fraction"] == 0.15
     assert result["constraint_inputs"]["signal_uncertainty_fraction"] == 0.50

@@ -39,6 +39,7 @@ const ARTIFACT_INFO = {
   sky_distribution: ["배경 분포", ""],
   allsky_preview: ["전천 영상", ""],
   exposure_snr_curve: ["노출시간–SNR", ""],
+  stack_efficiency_curve: ["스택 효율 · 한계효용", "밝기 구역별 구조 확보도가 추가 적분에서 얼마나 개선되는지 표시"],
   target_structure_profile: ["천체 밝기 구역", "공개 survey의 절대 광량이 아니라 상대 구조만 사용"],
 };
 
@@ -87,22 +88,101 @@ function assessmentSummary(assessment) {
 
 function escapeText(value) { return String(value ?? ""); }
 
-const PROFILE_SNAPSHOT_KEY = "noxis.profileSnapshots.v1";
+const PROFILE_SNAPSHOT_KEY = "noxis.profileCoreSnapshots.v2";
+const PROFILE_SNAPSHOT_LEGACY_KEY = "noxis.profileSnapshots.v1";
+const PROFILE_PREVIEW_KEY = "noxis.profilePreviewSnapshots.v1";
+
+function profileCore(profile) {
+  if (!profile || typeof profile !== "object") return null;
+  const core = { ...profile };
+  [
+    "scope_preview_url", "allsky_preview_url",
+    "scope_preview_data_url", "allsky_preview_data_url",
+    "browser_recovery", "server_restored", "restored",
+  ].forEach((key) => delete core[key]);
+  return core?.profile_id ? core : null;
+}
+
+function setProfileBackupStatus(message, ok = true) {
+  const status = $("profileBackupStatus");
+  if (!status) return;
+  status.textContent = message || "";
+  status.className = `status-text${message ? (ok ? " ok" : " error") : ""}`;
+}
+
+function loadProfilePreviews() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(PROFILE_PREVIEW_KEY) || "{}");
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch { return {}; }
+}
+
+function saveProfilePreview(profileId, preview) {
+  if (!profileId || !preview) return false;
+  try {
+    const previews = loadProfilePreviews();
+    previews[profileId] = preview;
+    localStorage.setItem(PROFILE_PREVIEW_KEY, JSON.stringify(previews));
+    return true;
+  } catch {
+    // Preview loss must never crowd the essential equipment profile out of storage.
+    try { localStorage.removeItem(PROFILE_PREVIEW_KEY); } catch { }
+    return false;
+  }
+}
+
+function migrateLegacyProfileSnapshots() {
+  if (localStorage.getItem(PROFILE_SNAPSHOT_KEY)) return;
+  try {
+    const legacy = JSON.parse(localStorage.getItem(PROFILE_SNAPSHOT_LEGACY_KEY) || "{}");
+    if (!legacy || typeof legacy !== "object" || Array.isArray(legacy)) return;
+    const coreSnapshots = {};
+    const previews = {};
+    Object.values(legacy).forEach((item) => {
+      const core = profileCore(item);
+      if (!core?.profile_id) return;
+      coreSnapshots[core.profile_id] = core;
+      const preview = {
+        scope_preview_data_url: item.scope_preview_data_url || null,
+        allsky_preview_data_url: item.allsky_preview_data_url || null,
+      };
+      if (preview.scope_preview_data_url || preview.allsky_preview_data_url) previews[core.profile_id] = preview;
+    });
+    try {
+      localStorage.setItem(PROFILE_SNAPSHOT_KEY, JSON.stringify(coreSnapshots));
+    } catch {
+      // A large legacy preview payload can consume the quota. Remove it and retry the tiny core backup.
+      localStorage.removeItem(PROFILE_SNAPSHOT_LEGACY_KEY);
+      localStorage.setItem(PROFILE_SNAPSHOT_KEY, JSON.stringify(coreSnapshots));
+    }
+    localStorage.removeItem(PROFILE_SNAPSHOT_LEGACY_KEY);
+    if (Object.keys(previews).length) {
+      try { localStorage.setItem(PROFILE_PREVIEW_KEY, JSON.stringify(previews)); } catch { localStorage.removeItem(PROFILE_PREVIEW_KEY); }
+    }
+  } catch { }
+}
 
 function loadProfileSnapshots() {
   try {
+    migrateLegacyProfileSnapshots();
     const raw = JSON.parse(localStorage.getItem(PROFILE_SNAPSHOT_KEY) || "{}");
     return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   } catch { return {}; }
 }
 
 function saveProfileSnapshot(profile) {
-  if (!profile?.profile_id) return;
+  const core = profileCore(profile);
+  if (!core?.profile_id) return false;
   try {
     const snapshots = loadProfileSnapshots();
-    snapshots[profile.profile_id] = profile;
+    snapshots[core.profile_id] = core;
     localStorage.setItem(PROFILE_SNAPSHOT_KEY, JSON.stringify(snapshots));
-  } catch { /* localStorage may be unavailable; server profile still works. */ }
+    setProfileBackupStatus("핵심 프로필 브라우저 백업 완료", true);
+    return true;
+  } catch {
+    setProfileBackupStatus("브라우저 백업 실패 · JSON 내보내기 권장", false);
+    return false;
+  }
 }
 
 async function compactPreviewDataUrl(url) {
@@ -123,15 +203,16 @@ async function compactPreviewDataUrl(url) {
 
 async function cacheProfilePreviewData(profile) {
   if (!profile?.profile_id) return profile;
-  const existing = getProfileSnapshot(profile.profile_id) || {};
-  const enriched = { ...existing, ...profile };
-  if (!enriched.scope_preview_data_url && profile.scope_preview_url) {
-    enriched.scope_preview_data_url = await compactPreviewDataUrl(profile.scope_preview_url);
+  const existing = loadProfilePreviews()[profile.profile_id] || {};
+  const preview = { ...existing };
+  if (!preview.scope_preview_data_url && profile.scope_preview_url) {
+    preview.scope_preview_data_url = await compactPreviewDataUrl(profile.scope_preview_url);
   }
-  if (!enriched.allsky_preview_data_url && profile.allsky_preview_url) {
-    enriched.allsky_preview_data_url = await compactPreviewDataUrl(profile.allsky_preview_url);
+  if (!preview.allsky_preview_data_url && profile.allsky_preview_url) {
+    preview.allsky_preview_data_url = await compactPreviewDataUrl(profile.allsky_preview_url);
   }
-  return enriched;
+  saveProfilePreview(profile.profile_id, preview);
+  return { ...profile, ...preview };
 }
 
 function removeProfileSnapshot(profileId) {
@@ -140,10 +221,39 @@ function removeProfileSnapshot(profileId) {
     delete snapshots[profileId];
     localStorage.setItem(PROFILE_SNAPSHOT_KEY, JSON.stringify(snapshots));
   } catch { }
+  try {
+    const previews = loadProfilePreviews();
+    delete previews[profileId];
+    localStorage.setItem(PROFILE_PREVIEW_KEY, JSON.stringify(previews));
+  } catch { }
 }
 
 function getProfileSnapshot(profileId) {
   return loadProfileSnapshots()[profileId] || null;
+}
+
+function withCachedPreview(profile) {
+  const preview = loadProfilePreviews()[profile?.profile_id] || {};
+  return {
+    ...profile,
+    scope_preview_url: profile?.scope_preview_url || preview.scope_preview_data_url || null,
+    allsky_preview_url: profile?.allsky_preview_url || preview.allsky_preview_data_url || null,
+    scope_preview_data_url: preview.scope_preview_data_url || null,
+    allsky_preview_data_url: preview.allsky_preview_data_url || null,
+  };
+}
+
+async function restoreProfileToServer(profile) {
+  const core = profileCore(profile);
+  if (!core?.profile_id) throw new Error("프로필 핵심 데이터 없음");
+  const response = await fetch("/api/equipment/profiles/restore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(core),
+  });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
+  return payload;
 }
 
 async function cacheServerProfileSnapshots(profiles) {
@@ -158,6 +268,48 @@ async function cacheServerProfileSnapshots(profiles) {
       }
     } catch { }
   }));
+}
+
+function exportSelectedProfile() {
+  const id = $("equipmentProfile").value;
+  const core = getProfileSnapshot(id) || profileCore(state.profiles.find((item) => item.profile_id === id));
+  if (!core) { setProfileBackupStatus("내보낼 프로필이 없습니다.", false); return; }
+  const payload = {
+    noxis_profile_export_version: 1,
+    exported_at: new Date().toISOString(),
+    profile: core,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const safeName = String(core.name || "noxis_profile").replace(/[^0-9A-Za-z가-힣._-]+/g, "_");
+  link.href = url;
+  link.download = `${safeName}.noxis-profile.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  setProfileBackupStatus("프로필 JSON 내보내기 완료", true);
+}
+
+async function importProfileFile(file) {
+  if (!file) return;
+  try {
+    const parsed = JSON.parse(await file.text());
+    const candidate = parsed?.profile && typeof parsed.profile === "object" ? parsed.profile : parsed;
+    const core = profileCore(candidate);
+    if (!core?.profile_id || !core?.name) throw new Error("NØXIS 프로필 JSON이 아닙니다.");
+    // Server validation is authoritative; browser storage is written only after validation succeeds.
+    const restored = await restoreProfileToServer(core);
+    saveProfileSnapshot(restored);
+    setProfileBackupStatus("프로필 가져오기 · 서버 복구 완료", true);
+    await loadProfiles(restored.profile_id);
+  } catch (error) {
+    setProfileBackupStatus(`프로필 가져오기 실패: ${error.message}`, false);
+  } finally {
+    const input = $("profileImportFile");
+    if (input) input.value = "";
+  }
 }
 
 function noteServerInstance(instanceId) {
@@ -765,15 +917,22 @@ async function loadProfiles(selectId = null) {
     void cacheServerProfileSnapshots(serverProfiles);
     const snapshots = loadProfileSnapshots();
     const serverIds = new Set(serverProfiles.map((item) => item.profile_id));
-    const recoveredProfiles = Object.values(snapshots)
-      .filter((item) => item?.profile_id && !serverIds.has(item.profile_id))
-      .map((item) => ({
-        ...item,
-        browser_recovery: true,
-        scope_preview_url: item.scope_preview_data_url || null,
-        allsky_preview_url: item.allsky_preview_data_url || null,
-      }));
-    state.profiles = [...serverProfiles, ...recoveredProfiles];
+    const recoveredCore = Object.values(snapshots)
+      .filter((item) => item?.profile_id && !serverIds.has(item.profile_id));
+    const restoreResults = await Promise.allSettled(recoveredCore.map((item) => restoreProfileToServer(item)));
+    const restoredIds = new Set(restoreResults
+      .filter((item) => item.status === "fulfilled")
+      .map((item) => item.value.profile_id));
+    const recoveredProfiles = recoveredCore.map((item) => withCachedPreview({
+      ...item,
+      browser_recovery: true,
+      server_restored: restoredIds.has(item.profile_id),
+    }));
+    state.profiles = [...serverProfiles.map(withCachedPreview), ...recoveredProfiles];
+    if (recoveredCore.length) {
+      const restoredCount = restoredIds.size;
+      setProfileBackupStatus(`Render 재시작 복구 ${restoredCount}/${recoveredCore.length}개 · 브라우저 핵심 백업 유지`, restoredCount === recoveredCore.length);
+    }
     const select = $("equipmentProfile");
     select.innerHTML = "";
     if (!state.profiles.length) {
@@ -797,11 +956,9 @@ async function loadProfiles(selectId = null) {
     renderSelectedProfile();
   } catch {
     const snapshots = Object.values(loadProfileSnapshots()).filter((item) => item?.profile_id);
-    state.profiles = snapshots.map((item) => ({
+    state.profiles = snapshots.map((item) => withCachedPreview({
       ...item,
       browser_recovery: true,
-      scope_preview_url: item.scope_preview_data_url || null,
-      allsky_preview_url: item.allsky_preview_data_url || null,
     }));
     const select = $("equipmentProfile");
     select.innerHTML = "";
@@ -844,6 +1001,12 @@ function renderSelectedProfile() {
     setSavedPreview("savedScopePreview", null);
     setSavedPreview("savedAllskyPreview", null);
     return;
+  }
+  const hasCoreBackup = Boolean(getProfileSnapshot(profile.profile_id));
+  if (hasCoreBackup) {
+    setProfileBackupStatus(profile.server_restored ? "브라우저 백업 · 현재 Render 서버에도 자동 복구됨" : "핵심 프로필 브라우저 백업 완료", true);
+  } else {
+    setProfileBackupStatus("브라우저 핵심 백업 없음", false);
   }
   box.innerHTML = "";
   const strong = document.createElement("strong"); strong.textContent = profile.name;
@@ -943,7 +1106,7 @@ function buildAnalysisForm({ useToken = true } = {}) {
   const selectedProfileId = $("equipmentProfile").value;
   form.append("profile_id", selectedProfileId);
   const profileSnapshot = getProfileSnapshot(selectedProfileId);
-  if (profileSnapshot) form.append("profile_snapshot_json", JSON.stringify(profileSnapshot));
+  if (profileSnapshot) form.append("profile_snapshot_json", JSON.stringify(profileCore(profileSnapshot)));
   const target = state.target;
   form.append("target_name", target.name || "선택 천체");
   form.append("target_object_type", target.object_type || "unknown");
@@ -955,7 +1118,8 @@ function buildAnalysisForm({ useToken = true } = {}) {
   addMaybe(form, "target_latitude", target.location?.latitude); addMaybe(form, "target_longitude", target.location?.longitude);
   addMaybe(form, "allsky_exposure_sec", valueOrNull("allskyExposure"));
   addMaybe(form, "allsky_bias_offset_adu", valueOrNull("allskyBiasOffset"));
-  form.append("target_snr", $("targetSnr").value); form.append("min_sub_exposure_sec", $("minExposure").value);
+  form.append("stack_mode", $("stackMode").value); form.append("max_stack_hours", $("maxStackHours").value);
+  form.append("min_sub_exposure_sec", $("minExposure").value);
   form.append("max_sub_exposure_sec", $("maxExposure").value); form.append("tracking_limit_sec", $("trackingLimit").value);
   form.append("background_limit_fraction", $("backgroundLimit").value); form.append("saturation_safety_fraction", $("saturationSafety").value);
   form.append("stack_efficiency", $("stackEfficiency").value); form.append("max_frames", $("maxFrames").value);
@@ -1085,7 +1249,9 @@ function renderResult(result) {
   const structureLabel = result.target_structure_model?.status === "ok"
     ? `구조 ${confidenceLabel(result.target_structure_model?.confidence)}`
     : "구조 fallback";
-  $("resultDetail").textContent = `${result.equipment_profile?.name || "장비 프로필"} · ${result.target?.object_type || "천체"} · 단일노출 ${exposureSelectionLabel(plan.selection_basis)} · ${structureLabel} · 신호 모델 ${result.target_signal_model?.source || "없음"}`;
+  const stackPlan = plan.stack_efficiency_plan || {};
+  const stackLabel = stackPlan.status === "ok" ? `스택 ${stackPlan.mode_label || plan.stack_mode || "균형"}` : "스택 계산 없음";
+  $("resultDetail").textContent = `${result.equipment_profile?.name || "장비 프로필"} · ${result.target?.object_type || "천체"} · 단일노출 ${exposureSelectionLabel(plan.selection_basis)} · ${stackLabel} · ${structureLabel}`;
   $("confidenceBox").textContent = `신뢰도 ${confidenceLabel(result.confidence)} · ${validityLabel(result.validity)}`;
   $("mSub").textContent = plan.recommended_sub_exposure_sec == null ? "확정 불가" : formatSubExposureSeconds(plan.recommended_sub_exposure_sec);
   const subRange = plan.recommended_sub_exposure_range_sec;
@@ -1096,25 +1262,40 @@ function renderResult(result) {
   $("mSnr").title = plan.structure_aware_integration
     ? `희미한 구조 ${formatNumber(plan.science_zone_percentile, 0)}백분위 기준 · 평균 대상 SNR ${formatNumber(plan.predicted_snr_per_sub_mean, 2)}`
     : "평균 대상 신호 기준";
-  $("mFrames").textContent = plan.frames == null
-    ? (plan.max_frames_exceeded ? `필요 ${formatNumber(plan.required_frames_unbounded, 0)}장` : "—")
-    : `${formatNumber(plan.frames, 0)}장`;
-  const frameRange = plan.required_frames_range;
-  $("mFrames").title = Array.isArray(frameRange) && frameRange.length === 2
-    ? `신호·배경 불확실성 범위 ${formatNumber(frameRange[0], 0)} – ${formatNumber(frameRange[1], 0)}장`
-    : "";
+  $("mFrames").textContent = plan.frames == null ? "—" : `${formatNumber(plan.frames, 0)}장`;
+  if (stackPlan.status === "ok") {
+    const utility = 100 * Number(stackPlan.recommended_structure_utility || 0);
+    const reliable = 100 * Number(stackPlan.recommended_reliable_structure_fraction || 0);
+    const nextHourRaw = stackPlan.additional_hour_structure_utility_gain;
+    const recentHourRaw = stackPlan.recent_hour_structure_utility_gain;
+    const marginalText = nextHourRaw == null
+      ? `최근 1시간 효용 +${formatNumber(100 * Number(recentHourRaw || 0), 1)}%p`
+      : `+1시간 예상 효용 +${formatNumber(100 * Number(nextHourRaw || 0), 1)}%p`;
+    let limited = "";
+    if (stackPlan.cap_limited) {
+      if (stackPlan.cap_limit_reason === "max_frames") limited = ` · 최대 ${formatNumber(stackPlan.max_frames_cap, 0)}장 제한`;
+      else if (stackPlan.cap_limit_reason === "time_horizon_and_max_frames") limited = ` · ${formatNumber(stackPlan.max_stack_hours, 1)}시간/최대 ${formatNumber(stackPlan.max_frames_cap, 0)}장 제한`;
+      else limited = ` · ${formatNumber(stackPlan.max_stack_hours, 1)}시간 분석범위 제한`;
+    }
+    const range = Array.isArray(stackPlan.recommended_frames_range)
+      ? ` · 불확실성 ${formatNumber(stackPlan.recommended_frames_range[0], 0)}–${formatNumber(stackPlan.recommended_frames_range[1], 0)}장`
+      : "";
+    $("mFrames").title = `${stackPlan.mode_label || "균형"} 단계 · 구조 효용 ${formatNumber(utility, 1)}% · 신뢰 구조 ${formatNumber(reliable, 0)}% · ${marginalText}${range}${limited}`;
+  } else { $("mFrames").title = ""; }
   $("mTotal").textContent = formatSeconds(plan.total_integration_sec);
+  $("mTotal").title = stackPlan.status === "ok" ? `실제 경과시간(프레임 오버헤드 포함) ${formatSeconds(stackPlan.recommended_elapsed_sec)}` : "";
   $("mAltitude").textContent = `${formatNumber(result.target?.alt_deg, 2)}°`;
   $("mAirmass").textContent = result.target?.airmass == null ? "—" : formatNumber(result.target.airmass, 5);
   $("mBackground").textContent = `${formatNumber(result.background_model?.telescope_background_e_per_sec_per_pixel, 3)} e⁻/s/pix`;
   renderList($("validityReasons"), result.validity_reasons || []);
   renderList($("warningList"), result.warnings || []);
   const artifacts = result.artifacts || {};
-  populateGallery("overviewGallery", ["sky_polar_map", "target_structure_profile", "exposure_snr_curve", "allsky_coordinate_overlay", "sky_reliability"], artifacts);
+  populateGallery("overviewGallery", ["sky_polar_map", "target_structure_profile", "stack_efficiency_curve", "allsky_coordinate_overlay", "sky_reliability"], artifacts);
   populateGallery("skyGallery", ["sky_polar_map", "allsky_coordinate_overlay", "sky_relative_map", "sky_reliability", "sky_altitude_profiles", "sky_map", "sky_distribution", "allsky_preview"], artifacts);
   const tables = $("diagnosticTables"); tables.innerHTML = "";
   tables.append(
     diagnosticTable("노출 계획", result.plan),
+    diagnosticTable("스택 효율 모델", plan.stack_efficiency_plan),
     diagnosticTable("대상 신호 모델", result.target_signal_model),
     diagnosticTable("천체 밝기 구조 모델", result.target_structure_model),
     diagnosticTable("실제 촬영 데이터 prior", result.exposure_evidence_prior),
@@ -1191,16 +1372,14 @@ function wireEvents() {
   $("importTarget").addEventListener("click", () => importStellariumTarget(false));
   $("createProfile").addEventListener("click", createEquipmentProfile);
   $("deleteProfile").addEventListener("click", deleteSelectedProfile);
+  $("exportProfile").addEventListener("click", exportSelectedProfile);
+  $("importProfile").addEventListener("click", () => $("profileImportFile").click());
+  $("profileImportFile").addEventListener("change", () => importProfileFile($("profileImportFile").files[0]));
   $("equipmentProfile").addEventListener("change", () => {
     if ($("equipmentProfile").value) localStorage.setItem("noxis.profileId", $("equipmentProfile").value);
     renderSelectedProfile(); updateReadyState();
   });
   $("minimumSkyAltitude").addEventListener("input", updateTargetAltitudeStatus);
-  $("targetSnr").addEventListener("input", () => {
-    document.querySelectorAll('.preset-row[data-target="targetSnr"] button').forEach((button) => {
-      button.classList.toggle("active", Number(button.dataset.value) === Number($("targetSnr").value));
-    });
-  });
   $("analyzeButton").addEventListener("click", analyzeSession);
   document.querySelectorAll(".preset-row button").forEach((button) => button.addEventListener("click", () => {
     const row = button.closest(".preset-row"); const input = $(row.dataset.target); input.value = button.dataset.value;

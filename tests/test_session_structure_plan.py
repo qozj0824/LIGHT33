@@ -51,10 +51,19 @@ def test_structure_uses_faint_zone_for_total_integration_and_bright_zone_for_sat
             "faint_structure_factor": 0.35,
             "bright_structure_factor": 4.0,
             "science_percentile": 25.0,
+            "zones": [
+                {"name": "매우 희미", "pixel_fraction": 0.2, "representative_relative_to_mean": 0.25, "percentile_low": 0, "percentile_high": 20},
+                {"name": "희미", "pixel_fraction": 0.2, "representative_relative_to_mean": 0.45, "percentile_low": 20, "percentile_high": 40},
+                {"name": "중간", "pixel_fraction": 0.2, "representative_relative_to_mean": 0.75, "percentile_low": 40, "percentile_high": 60},
+                {"name": "중간-밝음", "pixel_fraction": 0.2, "representative_relative_to_mean": 1.1, "percentile_low": 60, "percentile_high": 80},
+                {"name": "밝음", "pixel_fraction": 0.15, "representative_relative_to_mean": 1.8, "percentile_low": 80, "percentile_high": 95},
+                {"name": "코어", "pixel_fraction": 0.05, "representative_relative_to_mean": 3.5, "percentile_low": 95, "percentile_high": 100},
+            ],
         },
     )
     assert structured["snr_basis"] == "faint_structure_zone"
-    assert structured["required_frames_unbounded"] > structured["required_frames_mean_target"]
+    assert structured["stack_efficiency_plan"]["structure_aware"] is True
+    assert structured["stack_efficiency_plan"]["recommended_science_zone_stack_snr"] < structured["stack_efficiency_plan"]["recommended_mean_stack_snr"]
     assert structured["target_saturation_upper_sec"] < base["target_saturation_upper_sec"]
     # Faint structure must not lengthen the chosen sub-exposure.
     assert structured["recommended_sub_exposure_sec"] <= base["recommended_sub_exposure_sec"]

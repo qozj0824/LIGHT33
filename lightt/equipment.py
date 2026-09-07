@@ -602,7 +602,7 @@ def create_equipment_profile(
         else:
             warnings.append(
                 "기준 천체의 카탈로그 V등급이 없어 기기영점을 계산하지 못했습니다. "
-                "단일노출 상한은 계산할 수 있지만 목표 SNR 기반 촬영 장수는 제한될 수 있습니다."
+                "단일노출 상한은 계산할 수 있지만 절대 대상 신호가 없어 스택 효율 기반 총 적분 권고는 제한될 수 있습니다."
             )
 
         c_sys: float | None = None

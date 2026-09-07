@@ -114,11 +114,13 @@
             <select id="equipmentProfile"><option value="">불러오는 중</option></select>
           </label>
           <fieldset class="quality-control">
-            <legend>촬영 품질</legend>
-            <div class="preset-row quality-row" data-target="targetSnr">
-              <button type="button" data-value="50"><strong>빠름</strong><small>SNR 50</small></button>
-              <button type="button" class="active" data-value="100"><strong>표준</strong><small>SNR 100</small></button>
-              <button type="button" data-value="150"><strong>정밀</strong><small>SNR 150</small></button>
+            <legend>스택 전략</legend>
+            <input id="stackMode" type="hidden" value="balanced">
+            <div class="preset-row quality-row" data-target="stackMode">
+              <button type="button" data-value="quick"><strong>빠름</strong><small>효율 최고점</small></button>
+              <button type="button" class="active" data-value="balanced"><strong>균형</strong><small>한계효용 65%</small></button>
+              <button type="button" data-value="deep"><strong>고품질</strong><small>한계효용 35%</small></button>
+              <button type="button" data-value="very_deep"><strong>매우 깊게</strong><small>한계효용 18%</small></button>
             </div>
           </fieldset>
         </div>
@@ -128,7 +130,7 @@
         <details class="advanced-settings">
           <summary>상세 촬영 조건</summary>
           <div class="grid compact-grid three">
-            <label>목표 SNR<input id="targetSnr" type="number" value="100" min="0.1" max="10000" step="1"></label>
+            <label title="NØXIS가 이 범위를 넘어 무한히 긴 스택 시간을 외삽하지 않습니다.">스택 분석 최대 시간 (시간)<input id="maxStackHours" type="number" value="12" min="0.05" max="336" step="0.5"></label>
             <label>최소 단일노출 (초)<input id="minExposure" type="number" value="1" min="0.001" step="0.1"></label>
             <label title="추천값이 아니라 절대로 넘지 않을 상한입니다.">최대 단일노출 상한 (초)<input id="maxExposure" type="number" value="600" min="0.01" step="1"></label>
             <label>추적 한계 (초)<input id="trackingLimit" type="number" value="0" min="0" step="1"></label>
@@ -163,8 +165,8 @@
 
       <div class="metric-grid metric-grid-primary">
         <article><span>권장 단일노출</span><strong id="mSub">—</strong></article>
-        <article><span>필요 장수</span><strong id="mFrames">—</strong></article>
-        <article><span>총 적분시간</span><strong id="mTotal">—</strong></article>
+        <article><span>추천 스택 장수</span><strong id="mFrames">—</strong></article>
+        <article><span>추천 총 적분</span><strong id="mTotal">—</strong></article>
         <article><span>예상 1장 SNR</span><strong id="mSnr">—</strong></article>
       </div>
 
@@ -205,6 +207,14 @@
     <div class="profile-scroll">
       <section class="profile-block saved-profile-block">
         <div class="block-title-row"><h3>현재 프로필</h3><span id="savedProfileName" class="optional-badge">선택 없음</span></div>
+        <div class="profile-backup-row">
+          <span id="profileBackupStatus" class="status-text" aria-live="polite"></span>
+          <div class="profile-actions-inline">
+            <button type="button" id="exportProfile" class="ghost compact">JSON 내보내기</button>
+            <button type="button" id="importProfile" class="ghost compact">JSON 가져오기</button>
+            <input id="profileImportFile" class="hidden" type="file" accept=".json,.noxis-profile.json,application/json">
+          </div>
+        </div>
         <div class="profile-preview-grid saved-preview-grid">
           <article class="profile-image-preview">
             <div class="profile-image-frame"><img id="savedScopePreview" alt="등록된 망원경 기준 영상"><span>망원경</span></div>
