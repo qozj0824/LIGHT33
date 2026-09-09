@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+import struct
 import tempfile
 import warnings
 from collections.abc import Callable, Iterable
@@ -33,6 +34,7 @@ MASTER_TILE_TARGET_BYTES = int(
 )
 MAX_IMAGE_PIXELS = int(os.environ.get("LIGHTT_MAX_IMAGE_PIXELS", str(120_000_000)))
 RAW_CHUNK_ROWS = max(64, int(os.environ.get("LIGHTT_RAW_CHUNK_ROWS", "256")))
+CR3_METADATA_SCAN_BYTES = max(256 * 1024, int(os.environ.get("LIGHTT_CR3_METADATA_SCAN_BYTES", str(4 * 1024**2))))
 
 LOGGER = logging.getLogger(__name__)
 
@@ -551,6 +553,223 @@ def _build_green_planes_memory_safe(
     ]
     return green, saturation_plane, green_headrooms, _raw_cfa_codes(raw)
 
+
+_TIFF_TYPE_SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8}
+
+
+def _decode_tiff_value(
+    data: memoryview,
+    tiff_start: int,
+    entry_pos: int,
+    endian: str,
+    value_type: int,
+    count: int,
+) -> object | None:
+    """Decode a small TIFF/EXIF field from an embedded CR3 metadata TIFF.
+
+    CR3 keeps Canon metadata in small TIFF blocks (for example CMT1/CMT2) near
+    the start of the ISO-BMFF file. Reading only the prefix avoids pulling the
+    whole 25-50 MB RAW into another Python bytes object just to recover EXIF.
+    """
+    unit = _TIFF_TYPE_SIZES.get(int(value_type))
+    if unit is None or count <= 0 or count > 1_000_000:
+        return None
+    size = unit * int(count)
+    if size > len(data):
+        return None
+    if size <= 4:
+        raw = bytes(data[entry_pos + 8 : entry_pos + 8 + size])
+    else:
+        try:
+            offset = struct.unpack_from(endian + "I", data, entry_pos + 8)[0]
+        except struct.error:
+            return None
+        absolute = tiff_start + int(offset)
+        if absolute < 0 or absolute + size > len(data):
+            return None
+        raw = bytes(data[absolute : absolute + size])
+    try:
+        if value_type == 2:  # ASCII
+            return raw.rstrip(b"\x00").decode("utf-8", errors="replace").strip()
+        if value_type == 3:  # SHORT
+            values = struct.unpack(endian + ("H" * count), raw)
+            return values[0] if count == 1 else values
+        if value_type == 4:  # LONG
+            values = struct.unpack(endian + ("I" * count), raw)
+            return values[0] if count == 1 else values
+        if value_type == 5:  # RATIONAL
+            values: list[float | None] = []
+            for index in range(count):
+                numerator, denominator = struct.unpack_from(endian + "II", raw, index * 8)
+                values.append(float(numerator) / denominator if denominator else None)
+            return values[0] if count == 1 else values
+        if value_type == 9:  # SLONG
+            values = struct.unpack(endian + ("i" * count), raw)
+            return values[0] if count == 1 else values
+        if value_type == 10:  # SRATIONAL
+            values = []
+            for index in range(count):
+                numerator, denominator = struct.unpack_from(endian + "ii", raw, index * 8)
+                values.append(float(numerator) / denominator if denominator else None)
+            return values[0] if count == 1 else values
+        if value_type in {1, 7}:
+            return raw[0] if count == 1 else raw
+    except (struct.error, ValueError, OverflowError):
+        return None
+    return None
+
+
+def _parse_embedded_tiff_tags(data: memoryview, tiff_start: int) -> dict[int, object]:
+    if tiff_start < 0 or tiff_start + 8 > len(data):
+        return {}
+    byte_order = bytes(data[tiff_start : tiff_start + 2])
+    if byte_order == b"II":
+        endian = "<"
+    elif byte_order == b"MM":
+        endian = ">"
+    else:
+        return {}
+    try:
+        if struct.unpack_from(endian + "H", data, tiff_start + 2)[0] != 42:
+            return {}
+        first_ifd = int(struct.unpack_from(endian + "I", data, tiff_start + 4)[0])
+    except struct.error:
+        return {}
+
+    tags: dict[int, object] = {}
+    pending = [first_ifd]
+    seen: set[int] = set()
+    while pending and len(seen) < 32:
+        offset = int(pending.pop())
+        if offset <= 0 or offset in seen:
+            continue
+        seen.add(offset)
+        ifd_pos = tiff_start + offset
+        if ifd_pos < 0 or ifd_pos + 2 > len(data):
+            continue
+        try:
+            entry_count = int(struct.unpack_from(endian + "H", data, ifd_pos)[0])
+        except struct.error:
+            continue
+        if entry_count < 0 or entry_count > 2048:
+            continue
+        entries_end = ifd_pos + 2 + 12 * entry_count
+        if entries_end + 4 > len(data):
+            continue
+        for index in range(entry_count):
+            entry_pos = ifd_pos + 2 + 12 * index
+            try:
+                tag, value_type, count = struct.unpack_from(endian + "HHI", data, entry_pos)
+            except struct.error:
+                break
+            value = _decode_tiff_value(
+                data, tiff_start, entry_pos, endian, int(value_type), int(count)
+            )
+            if value is not None:
+                tags.setdefault(int(tag), value)
+            # EXIF IFD / GPS IFD pointers can contain the useful fields in other RAWs.
+            if tag in {0x8769, 0x8825} and isinstance(value, int) and value > 0:
+                pending.append(value)
+        try:
+            next_ifd = int(struct.unpack_from(endian + "I", data, entries_end)[0])
+        except struct.error:
+            next_ifd = 0
+        if next_ifd > 0:
+            pending.append(next_ifd)
+    return tags
+
+
+def _format_exif_datetime(value: object | None, offset: object | None = None) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    match = re.fullmatch(
+        r"(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?",
+        text,
+    )
+    if not match:
+        return text
+    fraction = f".{match.group(7)}" if match.group(7) else ""
+    zone = ""
+    if isinstance(offset, str) and re.fullmatch(r"[+-]\d{2}:?\d{2}", offset.strip()):
+        clean = offset.strip()
+        zone = clean if ":" in clean else clean[:3] + ":" + clean[3:]
+    return (
+        f"{match.group(1)}-{match.group(2)}-{match.group(3)}T"
+        f"{match.group(4)}:{match.group(5)}:{match.group(6)}{fraction}{zone}"
+    )
+
+
+def _cr3_embedded_exif_metadata(path: Path) -> dict[str, object]:
+    """Recover standard EXIF fields from Canon CR3 without external binaries.
+
+    rawpy/LibRaw can decode a CR3 successfully yet expose shutter=0 for some
+    Canon files. Canon CR3 stores standard TIFF/EXIF blocks near the file start,
+    so scan only a small prefix and use those values as a conservative fallback.
+    """
+    if path.suffix.lower() != ".cr3":
+        return {}
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(CR3_METADATA_SCAN_BYTES)
+    except OSError:
+        return {}
+    if len(prefix) < 16:
+        return {}
+    data = memoryview(prefix)
+    merged: dict[int, object] = {}
+    candidates = 0
+    for signature in (b"II*\x00", b"MM\x00*"):
+        start = 0
+        while candidates < 32:
+            index = prefix.find(signature, start)
+            if index < 0:
+                break
+            candidates += 1
+            tags = _parse_embedded_tiff_tags(data, index)
+            for tag, value in tags.items():
+                merged.setdefault(tag, value)
+            start = index + 4
+    if not merged:
+        return {}
+
+    exposure_raw = merged.get(0x829A)  # ExposureTime
+    f_number_raw = merged.get(0x829D)  # FNumber
+    iso_raw = merged.get(0x8827)       # PhotographicSensitivity / ISOSpeedRatings
+    make = merged.get(0x010F)
+    model = merged.get(0x0110)
+    date_original = merged.get(0x9003) or merged.get(0x0132)
+    offset_original = merged.get(0x9011) or merged.get(0x9010)
+
+    def finite_positive(value: object | None) -> float | None:
+        try:
+            number = float(cast(Any, value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if math.isfinite(number) and number > 0 else None
+
+    camera_parts: list[str] = []
+    make_text = str(make).strip() if isinstance(make, str) else ""
+    model_text = str(model).strip() if isinstance(model, str) else ""
+    if model_text:
+        if make_text and not model_text.lower().startswith(make_text.lower()):
+            camera_parts.extend([make_text, model_text])
+        else:
+            camera_parts.append(model_text)
+    elif make_text:
+        camera_parts.append(make_text)
+
+    return {
+        "exposure_sec": finite_positive(exposure_raw),
+        "f_number": finite_positive(f_number_raw),
+        "iso": finite_positive(iso_raw),
+        "camera": " ".join(camera_parts) or None,
+        "date_obs": _format_exif_datetime(date_original, offset_original),
+        "metadata_source": "cr3_embedded_tiff_exif",
+        "scan_bytes": len(prefix),
+    }
+
+
 def _raw_metadata(raw: Any) -> tuple[float | None, str | None, str | None, float | None]:
     exposure = camera = date_obs = None
     iso = None
@@ -633,6 +852,30 @@ def _load_raw(path: Path, *, lightweight: bool = False) -> ImageFrame:
         # the already-linear green plane by save_scope_preview().  A full RGB
         # postprocess of a 30+ MP CR3 can allocate well over 100 MB and was unused.
         exposure, camera, date_obs, iso = _raw_metadata(raw)
+        cr3_exif = _cr3_embedded_exif_metadata(path) if path.suffix.lower() == ".cr3" else {}
+        exposure_from_cr3_exif = exposure is None and cr3_exif.get("exposure_sec") is not None
+        iso_from_cr3_exif = iso is None and cr3_exif.get("iso") is not None
+        camera_from_cr3_exif = camera is None and cr3_exif.get("camera") is not None
+        date_from_cr3_exif = date_obs is None and cr3_exif.get("date_obs") is not None
+        if exposure_from_cr3_exif:
+            exposure = float(cast(Any, cr3_exif["exposure_sec"]))
+        if iso_from_cr3_exif:
+            iso = float(cast(Any, cr3_exif["iso"]))
+        if camera_from_cr3_exif:
+            camera = str(cr3_exif["camera"])
+        if date_from_cr3_exif:
+            date_obs = str(cr3_exif["date_obs"])
+        if cr3_exif:
+            LOGGER.info(
+                "raw_cr3_exif_fallback filename=%r exposure_sec=%s iso=%s camera=%r date_obs=%r "
+                "used_exposure=%s",
+                path.name,
+                cr3_exif.get("exposure_sec"),
+                cr3_exif.get("iso"),
+                cr3_exif.get("camera"),
+                cr3_exif.get("date_obs"),
+                exposure_from_cr3_exif,
+            )
         try:
             sizes = raw.sizes
             full_width = int(sizes.raw_width)
@@ -666,15 +909,25 @@ def _load_raw(path: Path, *, lightweight: bool = False) -> ImageFrame:
                 "black_levels": black_levels,
                 "cfa_pattern": letters.tolist(),
                 "iso_speed": iso,
+                "f_number": cr3_exif.get("f_number") if cr3_exif else None,
+                "cr3_exif_fallback": cr3_exif or None,
                 "raw_memory_mode": "inspect-lightweight" if lightweight else "analysis",
                 "raw_rgb_postprocess_skipped": True,
                 "memory_optimized_loader": True,
                 "preview_generation": "skipped_for_memory_safety",
                 "exposure_provenance": {
                     "selected_seconds": exposure,
-                    "selected_key": "RAW metadata shutter" if exposure is not None else None,
+                    "selected_key": (
+                        "CR3 embedded EXIF ExposureTime"
+                        if exposure_from_cr3_exif
+                        else ("RAW metadata shutter" if exposure is not None else None)
+                    ),
                     "selected_role": "image",
-                    "selection_rule": "raw_library_metadata" if exposure is not None else "missing",
+                    "selection_rule": (
+                        "cr3_embedded_exif_fallback"
+                        if exposure_from_cr3_exif
+                        else ("raw_library_metadata" if exposure is not None else "missing")
+                    ),
                     "confidence": "high" if exposure is not None else "none",
                     "candidates": [],
                     "comparisons": [],

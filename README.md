@@ -1,5 +1,7 @@
 # NØXIS
 
+> **v38.3 CR3 EXIF fallback patch:** Standard Canon CR3 TIFF/EXIF metadata is now recovered directly when rawpy/LibRaw decodes pixels but returns no shutter/ISO metadata. The parser scans only the first few MiB, so v38.2 RAW memory-safety gains are preserved.
+>
 > **v38.2 CR3/RAW memory-safety patch:** RAW loading no longer makes a full-frame float CFA copy or a full-resolution RGB `raw.postprocess()` image. Green CFA planes are combined in chunks, inspection/all-sky RAW uses a lightweight single-plane memory mode, and full scope analysis preserves a separate saturation plane only where it is physically needed. Stage logging makes Render-side RAW failures traceable.
 
 > **v38.1 all-sky inspect reliability + cache/font patch:** A successful `/api/inspect` response is committed before UI formatting, so a browser rendering exception can no longer be misreported as an all-sky image read failure. The HTML shell is no-store and static JS/CSS URLs are versioned to avoid frontend/backend cache mismatches after Render deploys. Matplotlib labels fully honor the Korean-font fallback path.
@@ -18,14 +20,14 @@
 > **v35.9 APICAM pedestal:** If an ESO APICAM FITS has no explicit Bias/offset calibration, NØXIS can estimate the same-frame bias+dark pedestal from the optically dark detector area outside the calibrated 180° image circle. The method is APICAM-specific, provenance is saved in JSON, and directional Csys quality remains planning until independent fisheye hold-out validation.
 > **v35.8 Render memory fix:** 4k-class all-sky FITS frames (including ESO APICAM/ALPACA) are now reduced to an 600-pixel analysis grid before coordinate transforms and star masking. The final 72×18 sky grid remains strongly oversampled, while peak RAM during equipment-profile creation is substantially lower.
 
- v38.2
+ v38.3
 
 > **v35.6 APICAM support:** ESO APICAM FITS files now use a camera-specific 4096×4096 mirrored fisheye directional model instead of the Canon EOS R/Sigma 8 mm calibration. The bundled APICAM solution is intentionally planning-grade until independent hold-out/external validation is completed.
 
 
 **방향별 하늘 배경과 저장된 장비 프로필을 이용한 천체 촬영 계획 프로그램**
 
-NØXIS v38.2는 v38.0의 스택 효율/장비 프로필 구조와 v38.1의 검사·캐시·폰트 수정을 유지하면서 CR3/RAW 메모리 사용을 크게 줄인 배포본입니다. 기존 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화 계산에 천체 밝기 구역별 스택 효율과 한계효용 기반 총 적분 계획을 연결한 배포본입니다.
+NØXIS v38.3은 v38.2의 CR3/RAW 메모리 최적화를 유지하면서, rawpy가 일부 Canon CR3에서 노출시간을 비워 반환할 때 파일 내부 표준 EXIF를 직접 읽어 노출시간·ISO·카메라·촬영시각을 복구하는 배포본입니다. 기존 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화 계산에 천체 밝기 구역별 스택 효율과 한계효용 기반 총 적분 계획을 연결한 배포본입니다.
 
 ## v34.2 핵심 수정
 
