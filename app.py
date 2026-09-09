@@ -362,7 +362,7 @@ async def inspect_image(
     try:
         path = await _save_upload(file, job_dir, safe_role, budget)
         upload_done = time.perf_counter()
-        frame = await run_in_threadpool(load_image, path)
+        frame = await run_in_threadpool(load_image, path, lightweight=True)
         decode_done = time.perf_counter()
         _validate_pixels(frame.metadata.width, frame.metadata.height)
         domain = None

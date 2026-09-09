@@ -939,7 +939,7 @@ def run_session_analysis(
         warnings.append(
             "선택 대상은 행성·달·혜성 등 태양계 천체로 분류됩니다. 보고서의 심우주 대상 신호/SNR 검증 범위를 벗어나므로 결과를 계획용으로 낮춥니다."
         )
-    allsky_original = load_image(allsky_path)
+    allsky_original = load_image(allsky_path, lightweight=True)
     allsky_metadata = allsky_original.metadata
     time_difference_min, time_notes = _time_alignment(
         target_time_utc=target.get("observation_time_utc"),

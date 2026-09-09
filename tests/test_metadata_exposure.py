@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from astropy.io import fits
+
+fits = pytest.importorskip("astropy.io.fits")
 from PIL import Image
 from PIL.TiffImagePlugin import IFDRational
 

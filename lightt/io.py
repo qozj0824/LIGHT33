@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
@@ -31,6 +32,9 @@ MASTER_TILE_TARGET_BYTES = int(
     os.environ.get("LIGHTT_MASTER_TILE_BYTES", str(192 * 1024**2))
 )
 MAX_IMAGE_PIXELS = int(os.environ.get("LIGHTT_MAX_IMAGE_PIXELS", str(120_000_000)))
+RAW_CHUNK_ROWS = max(64, int(os.environ.get("LIGHTT_RAW_CHUNK_ROWS", "256")))
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _check_pixel_count(width: int, height: int, label: str = "영상") -> None:
@@ -476,19 +480,76 @@ def _raw_cfa_codes(raw: Any) -> np.ndarray:
     return np.vectorize(lambda code: code_to_letter.get(int(code), "?"))(pattern)
 
 
-def _subtract_black_cfa(raw_values: np.ndarray, raw: Any) -> np.ndarray:
-    values = raw_values.astype(np.float32, copy=True)
+def _raw_green_positions(raw: Any) -> list[tuple[int, int, int, float]]:
+    """Return green CFA locations as (row, col, color_code, black_level)."""
+    letters = _raw_cfa_codes(raw)
     pattern = np.asarray(raw.raw_pattern)
-    black = list(getattr(raw, "black_level_per_channel", []) or [])
-    if not black:
-        return values
+    black_levels = [float(v) for v in (getattr(raw, "black_level_per_channel", []) or [])]
+    fallback_black = float(np.median(black_levels)) if black_levels else 0.0
+    positions: list[tuple[int, int, int, float]] = []
     for row in range(2):
         for col in range(2):
+            if str(letters[row, col]) != "G":
+                continue
             code = int(pattern[row, col])
-            level = float(black[code]) if code < len(black) else float(np.median(black))
-            values[row::2, col::2] -= level
-    return values
+            black = black_levels[code] if code < len(black_levels) else fallback_black
+            positions.append((row, col, code, float(black)))
+    if not positions:
+        raise ValueError("RAW CFA에서 Green 채널을 찾지 못했습니다.")
+    return positions
 
+
+def _build_green_planes_memory_safe(
+    visible: np.ndarray,
+    raw: Any,
+    *,
+    preserve_saturation: bool,
+) -> tuple[np.ndarray, np.ndarray | None, list[float], np.ndarray]:
+    """Build the linear green signal without a full-frame float RAW copy.
+
+    Only one green plane is promoted to float32 at a time.  The second green
+    photosite is folded in by row chunks, avoiding ``np.mean(list_of_planes)``
+    and ``np.max(list_of_planes)`` temporaries.  Inspection may skip the
+    separate saturation plane because it is diagnostic only; full analysis
+    retains it so clipping in either green photosite is not hidden by averaging.
+    """
+    positions = _raw_green_positions(raw)
+    raw_white_level = float(getattr(raw, "white_level", 0) or 0)
+    planes = [visible[row::2, col::2] for row, col, _, _ in positions]
+    min_h = min(int(plane.shape[0]) for plane in planes)
+    min_w = min(int(plane.shape[1]) for plane in planes)
+    if min_h <= 0 or min_w <= 0:
+        raise ValueError("RAW Green CFA 평면이 비어 있습니다.")
+
+    first_plane = planes[0][:min_h, :min_w]
+    first_black = positions[0][3]
+    green = first_plane.astype(np.float32, copy=True)
+    green -= np.float32(first_black)
+    np.maximum(green, 0.0, out=green)
+
+    saturation_plane = green.copy() if preserve_saturation else None
+    contributors = 1
+    for plane, (_, _, _, black) in zip(planes[1:], positions[1:]):
+        cropped = plane[:min_h, :min_w]
+        for y0 in range(0, min_h, RAW_CHUNK_ROWS):
+            y1 = min(min_h, y0 + RAW_CHUNK_ROWS)
+            temp = cropped[y0:y1].astype(np.float32, copy=True)
+            temp -= np.float32(black)
+            np.maximum(temp, 0.0, out=temp)
+            green[y0:y1] += temp
+            if saturation_plane is not None:
+                np.maximum(saturation_plane[y0:y1], temp, out=saturation_plane[y0:y1])
+        contributors += 1
+
+    if contributors > 1:
+        green *= np.float32(1.0 / contributors)
+
+    green_headrooms = [
+        raw_white_level - black
+        for _, _, _, black in positions
+        if raw_white_level > black
+    ]
+    return green, saturation_plane, green_headrooms, _raw_cfa_codes(raw)
 
 def _raw_metadata(raw: Any) -> tuple[float | None, str | None, str | None, float | None]:
     exposure = camera = date_obs = None
@@ -520,51 +581,57 @@ def _raw_metadata(raw: Any) -> tuple[float | None, str | None, str | None, float
     return exposure, camera, date_obs, iso
 
 
-def _load_raw(path: Path) -> ImageFrame:
+def _load_raw(path: Path, *, lightweight: bool = False) -> ImageFrame:
     try:
         import rawpy
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("RAW 입력에는 rawpy가 필요합니다.") from exc
 
-    with rawpy.imread(str(path)) as raw:
+    LOGGER.info(
+        "raw_decode_start filename=%r bytes=%s mode=%s",
+        path.name,
+        path.stat().st_size if path.exists() else None,
+        "inspect-lightweight" if lightweight else "analysis",
+    )
+    try:
+        raw_context = rawpy.imread(str(path))
+    except Exception:
+        LOGGER.exception("raw_decode_open_unpack_failed filename=%r", path.name)
+        raise
+
+    with raw_context as raw:
+        LOGGER.info("raw_decode_open_unpack_complete filename=%r", path.name)
         try:
             raw_sizes = raw.sizes
             _check_pixel_count(int(raw_sizes.raw_width), int(raw_sizes.raw_height), "RAW 영상")
         except AttributeError:
             pass
+
         visible = np.asarray(raw.raw_image_visible)
+        if visible.ndim != 2:
+            raise ValueError(f"RAW 센서 배열이 2차원이 아닙니다: {visible.shape}")
         original_dtype = str(visible.dtype)
-        corrected = np.maximum(_subtract_black_cfa(visible, raw), 0.0)
-        letters = _raw_cfa_codes(raw)
-        pattern = np.asarray(raw.raw_pattern)
-        black_levels = [float(v) for v in (getattr(raw, "black_level_per_channel", []) or [])]
-        raw_white_level = float(getattr(raw, "white_level", 0) or 0)
-        green_planes: list[np.ndarray] = []
-        green_headrooms: list[float] = []
-        for row in range(2):
-            for col in range(2):
-                if str(letters[row, col]) != "G":
-                    continue
-                plane = corrected[row::2, col::2]
-                green_planes.append(plane)
-                code = int(pattern[row, col])
-                black = black_levels[code] if code < len(black_levels) else 0.0
-                if raw_white_level > black:
-                    green_headrooms.append(raw_white_level - black)
-        if not green_planes:
-            raise ValueError("RAW CFA에서 Green 채널을 찾지 못했습니다.")
-        min_h = min(p.shape[0] for p in green_planes)
-        min_w = min(p.shape[1] for p in green_planes)
-        cropped_green = [p[:min_h, :min_w] for p in green_planes]
-        green = np.mean(cropped_green, axis=0).astype(np.float32)
-        # Preserve clipping if either green photosite clips; averaging can hide it.
-        saturation_plane = np.max(cropped_green, axis=0).astype(np.float32)
-        preview = raw.postprocess(
-            use_camera_wb=True,
-            no_auto_bright=True,
-            output_bps=8,
-            gamma=(2.222, 4.5),
+        if not np.issubdtype(visible.dtype, np.integer):
+            raise ValueError(f"지원하지 않는 RAW 센서 dtype입니다: {visible.dtype}")
+
+        # Full analysis keeps a second detector plane that preserves clipping in
+        # either green photosite.  Inspection deliberately reuses the averaged
+        # green plane to halve persistent numpy memory.
+        green, saturation_plane, green_headrooms, letters = _build_green_planes_memory_safe(
+            visible, raw, preserve_saturation=not lightweight
         )
+        LOGGER.info(
+            "raw_green_extract_complete filename=%r visible=%sx%s analysis=%sx%s "
+            "separate_saturation=%s",
+            path.name,
+            visible.shape[1], visible.shape[0],
+            green.shape[1], green.shape[0],
+            saturation_plane is not None,
+        )
+
+        # Do NOT call raw.postprocess() here.  NØXIS previews are generated from
+        # the already-linear green plane by save_scope_preview().  A full RGB
+        # postprocess of a 30+ MP CR3 can allocate well over 100 MB and was unused.
         exposure, camera, date_obs, iso = _raw_metadata(raw)
         try:
             sizes = raw.sizes
@@ -572,6 +639,8 @@ def _load_raw(path: Path) -> ImageFrame:
             full_height = int(sizes.raw_height)
         except Exception:
             full_height, full_width = visible.shape
+        raw_white_level = float(getattr(raw, "white_level", 0) or 0)
+        black_levels = [float(v) for v in (getattr(raw, "black_level_per_channel", []) or [])]
         linear_white_level = min(green_headrooms) if green_headrooms else max(raw_white_level, 0.0)
         metadata = ImageMetadata(
             filename=path.name,
@@ -579,9 +648,7 @@ def _load_raw(path: Path) -> ImageFrame:
             width=int(green.shape[1]),
             height=int(green.shape[0]),
             dtype=original_dtype,
-            bit_depth=int(np.iinfo(visible.dtype).bits)
-            if np.issubdtype(visible.dtype, np.integer)
-            else None,
+            bit_depth=int(np.iinfo(visible.dtype).bits),
             exposure_sec=exposure,
             date_obs=date_obs,
             camera=camera,
@@ -599,6 +666,10 @@ def _load_raw(path: Path) -> ImageFrame:
                 "black_levels": black_levels,
                 "cfa_pattern": letters.tolist(),
                 "iso_speed": iso,
+                "raw_memory_mode": "inspect-lightweight" if lightweight else "analysis",
+                "raw_rgb_postprocess_skipped": True,
+                "memory_optimized_loader": True,
+                "preview_generation": "skipped_for_memory_safety",
                 "exposure_provenance": {
                     "selected_seconds": exposure,
                     "selected_key": "RAW metadata shutter" if exposure is not None else None,
@@ -611,18 +682,28 @@ def _load_raw(path: Path) -> ImageFrame:
                 },
             },
         )
-        return ImageFrame(
-            intensity=_finite_array(green),
-            green=_finite_array(green),
-            raw_intensity=_finite_array(green),
-            saturation_intensity=_finite_array(saturation_plane),
-            preview_rgb=np.asarray(preview),
+
+        # ``green`` is already finite float32 derived from an integer CFA array;
+        # avoid four repeated _finite_array() scans/temporary masks.
+        saturation_source = saturation_plane if saturation_plane is not None else green
+        frame = ImageFrame(
+            intensity=green,
+            green=green,
+            raw_intensity=green,
+            saturation_intensity=saturation_source,
+            preview_rgb=None,
             metadata=metadata,
             coordinate_scale_x=2.0,
             coordinate_scale_y=2.0,
             photometric_area_multiplier=2.0,
         )
-
+        LOGGER.info(
+            "raw_decode_complete filename=%r mode=%s persistent_numpy_mb=%.1f",
+            path.name,
+            metadata.extra["raw_memory_mode"],
+            (green.nbytes + (0 if saturation_plane is None else saturation_plane.nbytes)) / 1024**2,
+        )
+        return frame
 
 def _load_rendered(path: Path) -> ImageFrame:
     with Image.open(path) as opened:
@@ -691,14 +772,21 @@ def _load_rendered(path: Path) -> ImageFrame:
         )
 
 
-def load_image(path: Path) -> ImageFrame:
+def load_image(path: Path, *, lightweight: bool = False) -> ImageFrame:
+    """Load an image for scientific analysis or lightweight inspection.
+
+    ``lightweight=True`` currently changes RAW handling only: the inspect path
+    skips the separate saturation-preservation array and never demosaics RGB.
+    Full analysis remains detector-safe and preserves clipping in either green
+    photosite.
+    """
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"지원하지 않는 파일 형식입니다: {suffix}")
     if suffix in FITS_EXTENSIONS:
         return _load_fits(path)
     if suffix in RAW_EXTENSIONS:
-        return _load_raw(path)
+        return _load_raw(path, lightweight=lightweight)
     return _load_rendered(path)
 
 
@@ -804,7 +892,7 @@ def _disk_backed_master(
             shape=(len(selected), height, width),
         )
         for index, path in enumerate(selected):
-            frame = load_image(path)
+            frame = load_image(path, lightweight=True)
             _validate_calibration_frame(frame, target, role, warnings)
             array = np.asarray(preprocess(frame), dtype=np.float32)
             _resize_to_shape(array, target.intensity.shape)

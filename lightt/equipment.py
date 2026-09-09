@@ -621,7 +621,7 @@ def create_equipment_profile(
         ref_allsky_flat_applied = False
         if reference_allsky_path is not None:
             allsky_filename = reference_allsky_path.name
-            allsky_original = load_image(reference_allsky_path)
+            allsky_original = load_image(reference_allsky_path, lightweight=True)
             try:
                 save_scope_preview(allsky_original.intensity, directory / "preview_allsky.png", max_dim=900)
             except Exception as exc:

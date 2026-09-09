@@ -20,8 +20,9 @@ def test_upload_writer_preserves_bytes(tmp_path: Path, monkeypatch) -> None:
     payload = bytes((index * 37) % 256 for index in range(2_500_123))
     observed = {}
 
-    def fake_load(path: Path):
+    def fake_load(path: Path, *, lightweight: bool = False):
         observed["bytes"] = path.read_bytes()
+        observed["lightweight"] = lightweight
         raise ValueError("decoder stop")
 
     monkeypatch.setattr(app_module, "load_image", fake_load)
@@ -31,6 +32,7 @@ def test_upload_writer_preserves_bytes(tmp_path: Path, monkeypatch) -> None:
     )
     assert response.status_code == 400
     assert observed["bytes"] == payload
+    assert observed["lightweight"] is True
 
 
 def test_stellarium_set_time_endpoint(monkeypatch) -> None:
@@ -126,12 +128,12 @@ def test_index_disables_stale_shell_cache_and_versions_assets() -> None:
     response = client.get("/")
     assert response.status_code == 200
     assert response.headers.get("cache-control") == "no-store"
-    assert '/static/app.js?v=38.1.0' in response.text
-    assert '/static/style.css?v=38.1.0' in response.text
+    assert '/static/app.js?v=38.2.0' in response.text
+    assert '/static/style.css?v=38.2.0' in response.text
 
 
-def test_health_reports_v38_1() -> None:
+def test_health_reports_v38_2() -> None:
     client = TestClient(app_module.app)
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["version"] == "38.1.0"
+    assert response.json()["version"] == "38.2.0"

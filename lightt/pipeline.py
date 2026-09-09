@@ -160,7 +160,7 @@ def run_analysis(
     settings.target_alt_deg = resolved_alt
     settings.target_az_deg = resolved_az
 
-    allsky_original = load_image(allsky_path)
+    allsky_original = load_image(allsky_path, lightweight=True)
     scope_original = load_image(scope_path)
     current_exposure, exposure_source = resolve_exposure(
         scope_original, settings.current_exposure_sec, settings.exposure_mode
