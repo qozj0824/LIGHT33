@@ -119,3 +119,19 @@ def test_profile_restore_endpoint_rejects_path_like_id(tmp_path: Path, monkeypat
     )
     assert response.status_code == 422
     assert not (tmp_path / "escape").exists()
+
+
+def test_index_disables_stale_shell_cache_and_versions_assets() -> None:
+    client = TestClient(app_module.app)
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.headers.get("cache-control") == "no-store"
+    assert '/static/app.js?v=38.1.0' in response.text
+    assert '/static/style.css?v=38.1.0' in response.text
+
+
+def test_health_reports_v38_1() -> None:
+    client = TestClient(app_module.app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["version"] == "38.1.0"

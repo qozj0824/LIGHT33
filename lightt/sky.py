@@ -653,9 +653,9 @@ def build_sky_map(
     else:
         vmin, vmax = 0.0, 1.0
     map_label = (
-        "Flat 보정된 관측 시점 방향별 하늘 배경 ADU 지도"
+        plot_text("Flat 보정된 관측 시점 방향별 하늘 배경 ADU 지도", "Flat-corrected sky background ADU map")
         if flat_applied
-        else "비네팅 미보정 관측 시점 방향별 하늘 배경 ADU 지도"
+        else plot_text("비네팅 미보정 관측 시점 방향별 하늘 배경 ADU 지도", "Sky background ADU map without vignetting correction")
     )
     map_path = result_dir / "sky_background_map.png"
     _save_rectangular_map(

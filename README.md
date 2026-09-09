@@ -1,5 +1,7 @@
 # NØXIS
 
+> **v38.1 all-sky inspect reliability + cache/font patch:** A successful `/api/inspect` response is committed before UI formatting, so a browser rendering exception can no longer be misreported as an all-sky image read failure. The HTML shell is no-store and static JS/CSS URLs are versioned to avoid frontend/backend cache mismatches after Render deploys. Matplotlib labels now fully honor the Korean-font fallback path, preventing DejaVu Sans missing-Hangul warnings on minimal Linux hosts.
+
 > **v38.0 stack-efficiency planning + resilient profiles:** NØXIS no longer forces a user-selected target SNR to determine total integration. The physics-based sub-exposure calculation remains separate, while total stack recommendations now follow the time evolution of six target-brightness zones, structure recovery, and diminishing information gain inside a finite planning horizon. Bright structure can still shorten the saturation upper bound; faint structure increases the value of stacking but never lengthens the sub-exposure. Equipment profiles are backed up as compact browser-side core JSON, preview data is isolated, missing Render-local profiles are automatically rehydrated, and profiles can be exported/imported as JSON.
 
 > **v36.3 header/preview reliability:** FITS inspection now builds WCS from a compact standards-only header instead of validating hundreds of unrelated ESO instrument cards. Preview statistics use a deterministic sample while exact clipping extrema remain full-frame. The main upload waits for inspection before reporting missing exposure, retries metadata during analysis after a fast-inspection failure, and newly created profiles retain compact browser-side previews. Bright extended targets such as planets and the Moon receive a target-pixel saturation upper bound before an exposure is recommended.
@@ -14,14 +16,14 @@
 > **v35.9 APICAM pedestal:** If an ESO APICAM FITS has no explicit Bias/offset calibration, NØXIS can estimate the same-frame bias+dark pedestal from the optically dark detector area outside the calibrated 180° image circle. The method is APICAM-specific, provenance is saved in JSON, and directional Csys quality remains planning until independent fisheye hold-out validation.
 > **v35.8 Render memory fix:** 4k-class all-sky FITS frames (including ESO APICAM/ALPACA) are now reduced to an 600-pixel analysis grid before coordinate transforms and star masking. The final 72×18 sky grid remains strongly oversampled, while peak RAM during equipment-profile creation is substantially lower.
 
- v38.0
+ v38.1
 
 > **v35.6 APICAM support:** ESO APICAM FITS files now use a camera-specific 4096×4096 mirrored fisheye directional model instead of the Canon EOS R/Sigma 8 mm calibration. The bundled APICAM solution is intentionally planning-grade until independent hold-out/external validation is completed.
 
 
 **방향별 하늘 배경과 저장된 장비 프로필을 이용한 천체 촬영 계획 프로그램**
 
-NØXIS v38.0은 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화 계산에 천체 밝기 구역별 스택 효율과 한계효용 기반 총 적분 계획을 연결한 배포본입니다.
+NØXIS v38.1은 v38.0의 스택 효율/장비 프로필 구조를 유지하면서 전천 영상 빠른 검사 표시, 배포 캐시, Render 그래프 폰트 fallback을 보강한 배포본입니다. 기존 작품설명서의 전천 영상 분석, 방향별 배경광 추출, 장비 특성 반영, 대기소광, SNR·포화 계산에 천체 밝기 구역별 스택 효율과 한계효용 기반 총 적분 계획을 연결한 배포본입니다.
 
 ## v34.2 핵심 수정
 

@@ -263,9 +263,21 @@ def save_stack_efficiency_curve(
         if not isinstance(sec, (int, float)) or sec <= 0:
             continue
         hours = float(sec) / 3600.0
-        label = str(tier.get("label") or key)
+        korean_tier = {
+            "quick": "빠름",
+            "balanced": "균형",
+            "deep": "고품질",
+            "very_deep": "매우 깊게",
+        }.get(key, key)
+        english_tier = {
+            "quick": "Quick",
+            "balanced": "Balanced",
+            "deep": "High quality",
+            "very_deep": "Very deep",
+        }.get(key, key)
+        label = plot_text(str(tier.get("label") or korean_tier), english_tier)
         if key == selected_mode:
-            label = f"{label} · 선택"
+            label = f"{label} · {plot_text('선택', 'Selected')}"
         ax.axvline(hours, linestyle=":" if key != selected_mode else "--", linewidth=1.0, label=label)
     ax.set_ylim(0, 103)
     ax.set_xlabel(plot_text("총 적분시간 (시간)", "Total integration (hours)"))

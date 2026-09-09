@@ -77,11 +77,16 @@ function assessmentLabel(assessment) {
 }
 
 function assessmentSummary(assessment) {
-  if (!assessment) return "";
+  if (!assessment || typeof assessment !== "object") return "";
+  const normalizeList = (value) => {
+    if (Array.isArray(value)) return value.map((item) => String(item)).filter(Boolean);
+    if (value === null || value === undefined || value === "") return [];
+    return [String(value)];
+  };
   const items = [
-    ...(assessment.required_actions || []),
-    ...(assessment.automatic_recoveries || []),
-    ...(assessment.warnings || []),
+    ...normalizeList(assessment.required_actions),
+    ...normalizeList(assessment.automatic_recoveries),
+    ...normalizeList(assessment.warnings),
   ];
   return items.length ? items.slice(0, 3).join(" · ") : "";
 }
@@ -501,38 +506,75 @@ async function inspectAllsky(file) {
   const form = new FormData();
   form.append("file", file);
   form.append("role", "allsky");
+
+  let response;
+  let payload;
   try {
-    const response = await fetch("/api/inspect", {
+    response = await fetch("/api/inspect", {
       method: "POST", body: form, signal: state.allskyInspectController.signal,
     });
-    const payload = await readJsonResponse(response);
-    if (sequence !== state.allskyInspectSequence) return;
-    if (!response.ok) throw new Error(payload.detail || "전천 영상 읽기 실패");
-    state.allskyToken = payload.upload_token || null;
-    state.allskyMetadata = payload.metadata || null;
-    state.allskyAssessment = payload.assessment || null;
-    state.allskyInspectFailed = false;
-    showServerPreview(payload.preview_url, "allskyPreview", "allskyPreviewPlaceholder");
-    $("allskyPreviewStatus").textContent = assessmentLabel(payload.assessment);
-    const assessmentText = assessmentSummary(payload.assessment);
-    $("allskyMetadata").textContent = [renderMetadata(payload.metadata), assessmentText].filter(Boolean).join(" · ");
-    if (payload.metadata?.exposure_sec && $("allskyExposure").value === "") {
-      $("allskyExposure").placeholder = `헤더: ${payload.metadata.exposure_sec}s`;
-    }
+    payload = await readJsonResponse(response);
   } catch (error) {
     if (error?.name === "AbortError" || sequence !== state.allskyInspectSequence) return;
-    // Keep the browser preview usable. The original file is retried during analysis.
     state.allskyInspectFailed = true;
+    console.warn("NØXIS all-sky inspect request failed", error);
     $("allskyPreviewStatus").textContent = "검사 재시도 가능";
-    $("allskyMetadata").textContent = `${file?.name || ""} · 빠른 검사에 실패했지만 분석 시 원본을 다시 읽습니다.`;
-  } finally {
-    if (sequence === state.allskyInspectSequence) {
-      state.allskyInspectController = null;
-      state.allskyInspecting = false;
-      updateReadyState();
+    $("allskyMetadata").textContent = `${file?.name || ""} · 서버 빠른 검사 요청에 실패했습니다. 분석 단계에서 원본을 다시 읽습니다.`;
+    state.allskyInspectController = null;
+    state.allskyInspecting = false;
+    updateReadyState();
+    return;
+  }
+
+  if (sequence !== state.allskyInspectSequence) return;
+  if (!response.ok) {
+    state.allskyInspectFailed = true;
+    console.warn("NØXIS all-sky inspect returned an error", response.status, payload);
+    $("allskyPreviewStatus").textContent = "검사 재시도 가능";
+    $("allskyMetadata").textContent = `${file?.name || ""} · ${payload?.detail || "전천 영상 빠른 검사에 실패했습니다. 분석 단계에서 원본을 다시 읽습니다."}`;
+  } else {
+    // Commit the server result before any DOM/formatting work.  From this point on
+    // the image has already been decoded and inspected successfully by NØXIS.
+    state.allskyToken = payload?.upload_token || null;
+    state.allskyMetadata = payload?.metadata || null;
+    state.allskyAssessment = payload?.assessment || null;
+    state.allskyInspectFailed = false;
+
+    try {
+      showServerPreview(payload?.preview_url, "allskyPreview", "allskyPreviewPlaceholder");
+      $("allskyPreviewStatus").textContent = assessmentLabel(payload?.assessment) || "서버 검사 완료";
+      const assessmentText = assessmentSummary(payload?.assessment);
+      $("allskyMetadata").textContent = [renderMetadata(payload?.metadata), assessmentText].filter(Boolean).join(" · ");
+      if (payload?.metadata?.exposure_sec && $("allskyExposure").value === "") {
+        $("allskyExposure").placeholder = `헤더: ${payload.metadata.exposure_sec}s`;
+      }
+    } catch (uiError) {
+      // UI formatting is non-fatal.  Preserve the valid upload token/metadata so
+      // analysis can continue instead of falsely reporting an image-read failure.
+      console.error("NØXIS all-sky inspect UI rendering failed", uiError, payload);
+      const status = $("allskyPreviewStatus");
+      const metadata = $("allskyMetadata");
+      if (status) status.textContent = "서버 검사 완료";
+      if (metadata) {
+        const width = Number(payload?.metadata?.width);
+        const height = Number(payload?.metadata?.height);
+        const exposure = Number(payload?.metadata?.exposure_sec);
+        const basics = [file?.name || ""];
+        if (Number.isFinite(width) && Number.isFinite(height)) basics.push(`${width} × ${height}`);
+        if (Number.isFinite(exposure) && exposure > 0) basics.push(`노출 ${exposure}s`);
+        basics.push("검사는 정상 완료되었으나 상세 표시 일부를 생략했습니다.");
+        metadata.textContent = basics.filter(Boolean).join(" · ");
+      }
     }
   }
+
+  if (sequence === state.allskyInspectSequence) {
+    state.allskyInspectController = null;
+    state.allskyInspecting = false;
+    updateReadyState();
+  }
 }
+
 
 
 function formatCaptureMetadata(metadata, captureTimeUtc) {
